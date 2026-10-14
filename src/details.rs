@@ -78,6 +78,84 @@ pub(crate) fn text(element: ElementRef<'_>) -> String {
 pub(crate) fn fragment_text(html: &str) -> String {
     text(Html::parse_fragment(html).root_element())
 }
+
+fn description_text(element: ElementRef<'_>) -> String {
+    #[derive(Default)]
+    struct Lines {
+        text: String,
+        pending_space: bool,
+    }
+    impl Lines {
+        fn boundary(&mut self) {
+            self.pending_space = false;
+            if !self.text.is_empty() && !self.text.ends_with('\n') {
+                self.text.push('\n');
+            }
+        }
+        fn append(&mut self, text: &str) {
+            for ch in text.chars() {
+                // Colapsa el espacio del código HTML, conservando los &nbsp; visibles.
+                if matches!(ch, ' ' | '\t' | '\n' | '\r' | '\u{000c}') {
+                    self.pending_space = !self.text.is_empty() && !self.text.ends_with('\n');
+                } else {
+                    if self.pending_space {
+                        self.text.push(' ');
+                    }
+                    self.pending_space = false;
+                    self.text.push(ch);
+                }
+            }
+        }
+    }
+    fn visit(element: ElementRef<'_>, lines: &mut Lines) {
+        let name = element.value().name();
+        if matches!(name, "button" | "script" | "style" | "template")
+            || element.value().attr("hidden").is_some()
+        {
+            return;
+        }
+        if name == "br" {
+            lines.text.push('\n');
+            lines.pending_space = false;
+            return;
+        }
+        let block = matches!(
+            name,
+            "div"
+                | "p"
+                | "li"
+                | "ul"
+                | "ol"
+                | "h1"
+                | "h2"
+                | "h3"
+                | "h4"
+                | "h5"
+                | "h6"
+                | "blockquote"
+                | "pre"
+                | "section"
+                | "tr"
+                | "hr"
+        );
+        if block {
+            lines.boundary();
+        }
+        for node in element.children() {
+            if let Some(text) = node.value().as_text() {
+                lines.append(text);
+            } else if let Some(child) = ElementRef::wrap(node) {
+                visit(child, lines);
+            }
+        }
+        if block {
+            lines.boundary();
+        }
+    }
+    let mut lines = Lines::default();
+    visit(element, &mut lines);
+    lines.text.trim().to_owned()
+}
 fn child_text(element: ElementRef<'_>, css: &str) -> String {
     element
         .select(&selector(css))
@@ -305,7 +383,7 @@ pub(crate) fn admin_wods(html: &str) -> BTreeMap<i64, Wod> {
             })
             .map(text);
         wods.insert(id, Wod {id, name:cells.first().cloned().unwrap_or_default(),
-            description:description.map(text).unwrap_or_default(), scoring:cells.get(2).cloned().unwrap_or_default(),
+            description:description.map(description_text).unwrap_or_default(), scoring:cells.get(2).cloned().unwrap_or_default(),
             metadata:json!({"columns":cells,"category":category,"description_html":description.map(|e|e.inner_html()),"description_reference":format!("wd{id}")}),
         });
     }
@@ -404,7 +482,7 @@ pub(crate) fn enrich_judge_form(html: &str, team: &mut Team, wods: &mut BTreeMap
                     .select(&selector(&format!("#{reference} .reveralInner")))
                     .next()
             {
-                wod.description = text(block);
+                wod.description = description_text(block);
                 wod.metadata["description_html"] = json!(block.inner_html());
                 wod.metadata["description_reference"] = json!(reference);
             }
@@ -448,6 +526,28 @@ pub(crate) fn enrich_judge_form(html: &str, team: &mut Team, wods: &mut BTreeMap
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn preserves_description_lines_without_breaking_inline_words() {
+        let html = r#"
+            <div>
+                <div>For time: <strong>Cap 13'</strong></div>
+                <div>450m Run</div>
+                <div>10 <span>Synchro</span> BBJO</div>
+                <div>&nbsp;</div>
+                <div>30 Heavy Wall Ball<br>12/9</div>
+                <div><br></div>
+                <p>Scale: <strong>10</strong>kg &amp; 8kg</p>
+            </div>
+            <button class="close-button">×</button>
+            <script>ignored script</script>
+            <div hidden>ignored hidden content</div>
+        "#;
+        assert_eq!(
+            description_text(Html::parse_fragment(html).root_element()),
+            "For time: Cap 13'\n450m Run\n10 Synchro BBJO\n\u{a0}\n30 Heavy Wall Ball\n12/9\n\nScale: 10kg & 8kg"
+        );
+    }
 
     #[test]
     fn captures_registration_and_wod_references_and_preserves_null_scores() {
@@ -495,10 +595,10 @@ mod tests {
                 metadata: json!({}),
             },
         )]);
-        let form = r#"<h4>Wod real</h4><div id="CtlWodsResults_CtlUpMain"><input type="hidden" name="CSRFToken" value="secret-token"><input type="hidden" name="__VIEWSTATE" value="secret-state"><label for="tie">Desempate</label><input id="tie" name="score$tie" value="03:21"><label for="unit">Unidad</label><select id="unit" name="score$unit"><option value="10" selected>Kg</option><option value="20">Lb</option></select><a data-open="description">Description</a><input id="save" name="score$save" type="submit"></div><div id="description"><div class="reveralInner"><p>AMRAP 10 minutos</p></div></div>"#;
+        let form = r#"<h4>Wod real</h4><div id="CtlWodsResults_CtlUpMain"><input type="hidden" name="CSRFToken" value="secret-token"><input type="hidden" name="__VIEWSTATE" value="secret-state"><label for="tie">Desempate</label><input id="tie" name="score$tie" value="03:21"><label for="unit">Unidad</label><select id="unit" name="score$unit"><option value="10" selected>Kg</option><option value="20">Lb</option></select><a data-open="description">Description</a><input id="save" name="score$save" type="submit"></div><div id="description"><div class="reveralInner"><div>AMRAP 10 minutos</div><div>10 burpees</div></div></div>"#;
         enrich_judge_form(form, &mut team, &mut wods);
         assert_eq!(wods[&34].name, "Wod real");
-        assert_eq!(wods[&34].description, "AMRAP 10 minutos");
+        assert_eq!(wods[&34].description, "AMRAP 10 minutos\n10 burpees");
         let fields = &team.scores[0].metadata["fields"];
         assert_eq!(fields[0]["attributes"]["name"], "score$tie");
         assert_eq!(fields[0]["value"], "03:21");
@@ -514,9 +614,9 @@ mod tests {
 
     #[test]
     fn reads_admin_metadata_and_rejects_unexpected_leaderboards() {
-        let html = r#"<div id="maincolumn"><h3>RX</h3><div class="table-scroll"><table><tr><th>Name</th><th>Dates</th><th>Scores</th></tr><tr><td>Evento 1</td><td>15/04/2023</td><td><a data-open="wd34">Description</a>For time</td></tr></table></div></div><div id="wd34"><div class="reveralInner">50 burpees</div></div>"#;
+        let html = r#"<div id="maincolumn"><h3>RX</h3><div class="table-scroll"><table><tr><th>Name</th><th>Dates</th><th>Scores</th></tr><tr><td>Evento 1</td><td>15/04/2023</td><td><a data-open="wd34">Description</a>For time</td></tr></table></div></div><div id="wd34"><div class="reveralInner"><div>50 burpees</div><div>100m run</div></div></div>"#;
         let wods = admin_wods(html);
-        assert_eq!(wods[&34].description, "50 burpees");
+        assert_eq!(wods[&34].description, "50 burpees\n100m run");
         assert_eq!(wods[&34].metadata["category"], "RX");
         assert_eq!(wods[&34].metadata["columns"][1], "15/04/2023");
         assert!(parse_leaderboard("<input type=password>").is_err());

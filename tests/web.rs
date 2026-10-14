@@ -226,6 +226,7 @@ async fn form_csrf_and_private_success_page(pool: PgPool) -> topcoat::Result<()>
                 && cached_detail.contains("Team &amp; Co")
         );
         assert!(!cached_detail.contains(">Cargar</button>"));
+        assert!(cached_detail.contains("<p class=\"description\">AMRAP 10 minutos</p>"));
         assert!(cached_detail.contains("<title>SOUTH GAMES · WodBuster Jueces</title>"));
         assert_eq!(cached_detail.matches("<head>").count(), 1);
         assert_eq!(

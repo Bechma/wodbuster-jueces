@@ -1,0 +1,45 @@
+services:
+  db:
+    image: docker.io/postgres:18
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:5432:5432"
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}
+      POSTGRES_DB: postgres
+    volumes:
+      - postgres_dev_data:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  browserless:
+    image: ghcr.io/browserless/chromium:latest
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:30000:3000"
+    environment:
+      TOKEN: ${BROWSER_TOKEN:?Set BROWSER_TOKEN}
+      CONCURRENT: 2
+      TIMEOUT: 120000
+      HEALTH: true
+      DEBUG_COLORS: 0
+      EXTERNAL: "http://localhost:30000"
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "curl",
+          "-H",
+          "Authorization: Bearer ${BROWSER_TOKEN:?Set BROWSER_TOKEN}",
+          "http://127.0.0.1:3000/active",
+        ]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+volumes:
+  postgres_dev_data:

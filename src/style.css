@@ -1,0 +1,21 @@
+:root { color-scheme: light; font-family: system-ui, sans-serif; color: #162a36; background: #f1f5f6; }
+* { box-sizing: border-box; }
+body { margin: 0; min-height: 100vh; }
+main { max-width: 470px; margin: 0 auto; padding: 64px 20px; }
+.brand { font-size: 12px; font-weight: 800; letter-spacing: 2px; color: #425965; margin: 0 0 28px 4px; }
+.card { background: white; border: 1px solid #dde6e9; border-radius: 18px; padding: 34px; box-shadow: 0 12px 40px #162a3608; }
+.eyebrow { font-size: 11px; letter-spacing: 1.6px; font-weight: 800; color: #087b77; margin: 0 0 12px; }
+h1 { font-size: 29px; letter-spacing: -1px; margin: 0 0 12px; }
+p { line-height: 1.6; }
+.intro { font-size: 14px; color: #5b6c77; margin: 0 0 28px; }
+label { display: block; font-size: 13px; font-weight: 650; margin: 20px 0 8px; }
+input:not([type=hidden]) { width: 100%; border: 1px solid #cdd9df; background: #fcfdfd; border-radius: 8px; padding: 12px 13px; font: inherit; font-size: 14px; }
+input:focus { outline: 3px solid #087b7720; border-color: #087b77; }
+button { margin-top: 26px; width: 100%; border: 0; background: #087b77; color: white; padding: 14px 12px; border-radius: 8px; font: inherit; font-size: 14px; font-weight: 700; cursor: pointer; }
+button:hover { background: #076460; }
+button:focus-visible { outline: 3px solid #087b7760; outline-offset: 3px; }
+.footnote { color: #75838c; font-size: 12px; margin: 22px 0 0; }
+.notice { padding: 14px; border-radius: 8px; font-size: 13px; line-height: 1.6; }
+.error { background: #fff2f1; color: #9c322c; border: 1px solid #f1d5d2; }
+.success { background: #e9f5f1; color: #236951; border: 1px solid #cbe6da; margin-top: 22px; }
+@media (max-width: 480px) { main { padding-top: 32px; } .card { padding: 26px; } }

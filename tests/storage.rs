@@ -1,6 +1,48 @@
 use sqlx::PgPool;
 use uuid::Uuid;
-use wodbuster_jueces::{browser::AuthCookie, storage::SessionStore};
+use wodbuster_jueces::{browser::AuthCookie, competitions::Competition, storage::SessionStore};
+
+#[sqlx::test]
+#[ignore = "Requiere Postgres de compose.dev.yml y DATABASE_URL"]
+async fn competitions_survive_new_sessions_and_are_isolated_by_account(
+    pool: PgPool,
+) -> topcoat::Result<()> {
+    let store = SessionStore::new(pool.clone(), "test-session-secret-with-at-least-32-bytes");
+    let expected = vec![
+        Competition::new(1246, "InterBOX 909"),
+        Competition::new(3910, "SOUTH GAMES"),
+    ];
+    store
+        .save_competitions("judge@example.com", &expected)
+        .await?;
+    store
+        .save_competitions("other@example.com", &[Competition::new(519, "Other")])
+        .await?;
+    let reopened = SessionStore::new(pool, "test-session-secret-with-at-least-32-bytes");
+    assert_eq!(reopened.competitions("JUDGE@example.com").await?, expected);
+    assert_eq!(reopened.competitions("other@example.com").await?.len(), 1);
+    assert!(
+        reopened
+            .competitions("unknown@example.com")
+            .await?
+            .is_empty()
+    );
+    // Una escritura incompleta revierte también el borrado de la lista anterior.
+    assert!(
+        reopened
+            .save_competitions(
+                "judge@example.com",
+                &[expected[0].clone(), Competition::new(-1, "Invalid")]
+            )
+            .await
+            .is_err()
+    );
+    assert_eq!(reopened.competitions("judge@example.com").await?, expected);
+    reopened.save_competitions("judge@example.com", &[]).await?;
+    assert!(reopened.competitions("judge@example.com").await?.is_empty());
+    assert_eq!(reopened.competitions("other@example.com").await?.len(), 1);
+    Ok(())
+}
 
 #[sqlx::test]
 #[ignore = "Requiere Postgres de compose.dev.yml y DATABASE_URL"]

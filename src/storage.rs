@@ -7,6 +7,9 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::browser::AuthCookie;
+use crate::competitions::Competition;
+use crate::details::CompetitionDetail;
+use sqlx::types::Json;
 
 pub struct SessionStore {
     pool: PgPool,
@@ -19,6 +22,130 @@ pub struct SavedSession {
 }
 
 impl SessionStore {
+    pub async fn competitions(&self, username: &str) -> topcoat::Result<Vec<Competition>> {
+        Ok(sqlx::query_as(
+            "SELECT id, name, judge_url, admin_url FROM wodbuster_competitions WHERE username = $1 ORDER BY name, id",
+        )
+        .bind(username.to_lowercase())
+        .fetch_all(&self.pool)
+        .await?)
+    }
+
+    /// Reemplaza la lista solo después de una carga autenticada y válida.
+    pub async fn save_competitions(
+        &self,
+        username: &str,
+        competitions: &[Competition],
+    ) -> topcoat::Result<()> {
+        let username = username.to_lowercase();
+        let mut transaction = self.pool.begin().await?;
+        // Serializa las cargas de una misma cuenta, sin bloquear las de otros usuarios.
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+            .bind(&username)
+            .execute(&mut *transaction)
+            .await?;
+        let ids = competitions.iter().map(|c| c.id).collect::<Vec<_>>();
+        sqlx::query(
+            "DELETE FROM wodbuster_competitions WHERE username = $1 AND NOT (id = ANY($2))",
+        )
+        .bind(&username)
+        .bind(ids)
+        .execute(&mut *transaction)
+        .await?;
+        for competition in competitions {
+            sqlx::query(
+                "INSERT INTO wodbuster_competitions (username, id, name, judge_url, admin_url) VALUES ($1, $2, $3, $4, $5)
+                 ON CONFLICT (username, id) DO UPDATE SET name=EXCLUDED.name, judge_url=EXCLUDED.judge_url, admin_url=EXCLUDED.admin_url",
+            )
+            .bind(&username)
+            .bind(competition.id)
+            .bind(&competition.name)
+            .bind(&competition.judge_url).bind(&competition.admin_url)
+            .execute(&mut *transaction)
+            .await?;
+        }
+        transaction.commit().await?;
+        Ok(())
+    }
+
+    /// Borra los datos locales de la competición solo para esta cuenta.
+    pub async fn delete_competition(&self, username: &str, id: i64) -> topcoat::Result<bool> {
+        let username = username.to_lowercase();
+        let mut tx = self.pool.begin().await?;
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+            .bind(&username)
+            .execute(&mut *tx)
+            .await?;
+        let deleted = sqlx::query("DELETE FROM wodbuster_competitions WHERE username=$1 AND id=$2")
+            .bind(&username)
+            .bind(id)
+            .execute(&mut *tx)
+            .await?
+            .rows_affected()
+            > 0;
+        // Las claves foráneas borran también el detalle, categorías, equipos, WODs y puntuaciones.
+        tx.commit().await?;
+        Ok(deleted)
+    }
+
+    pub async fn competition_detail(
+        &self,
+        username: &str,
+        id: i64,
+    ) -> topcoat::Result<Option<CompetitionDetail>> {
+        let row = sqlx::query_as::<_,(Json<CompetitionDetail>,String)>(
+            "SELECT snapshot, to_char(loaded_at AT TIME ZONE 'Europe/Madrid', 'DD/MM/YYYY HH24:MI') FROM competition_details WHERE username=$1 AND competition_id=$2")
+            .bind(username.to_lowercase()).bind(id).fetch_optional(&self.pool).await?;
+        Ok(row.map(|(Json(mut snapshot), loaded_at)| {
+            snapshot.loaded_at = Some(loaded_at);
+            snapshot
+        }))
+    }
+
+    pub async fn save_competition_detail(
+        &self,
+        username: &str,
+        detail: &CompetitionDetail,
+    ) -> topcoat::Result<()> {
+        let username = username.to_lowercase();
+        let mut tx = self.pool.begin().await?;
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+            .bind(&username)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("DELETE FROM competition_details WHERE username=$1 AND competition_id=$2")
+            .bind(&username)
+            .bind(detail.id)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query(
+            "INSERT INTO competition_details (username,competition_id,snapshot) VALUES ($1,$2,$3)",
+        )
+        .bind(&username)
+        .bind(detail.id)
+        .bind(Json(detail))
+        .execute(&mut *tx)
+        .await?;
+        for category in &detail.categories {
+            sqlx::query("INSERT INTO competition_categories (username,competition_id,id,name,metadata) VALUES ($1,$2,$3,$4,$5)")
+                .bind(&username).bind(detail.id).bind(category.id).bind(&category.name).bind(Json(&category.metadata)).execute(&mut *tx).await?;
+            for wod in &category.wods {
+                sqlx::query("INSERT INTO competition_wods (username,competition_id,category_id,id,name,data) VALUES ($1,$2,$3,$4,$5,$6)")
+                    .bind(&username).bind(detail.id).bind(category.id).bind(wod.id).bind(&wod.name).bind(Json(wod)).execute(&mut *tx).await?;
+            }
+            for team in &category.teams {
+                sqlx::query("INSERT INTO competition_teams (username,competition_id,category_id,reference,registration_id,gid,name,data) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)")
+                    .bind(&username).bind(detail.id).bind(category.id).bind(&team.reference).bind(team.registration_id).bind(&team.gid).bind(&team.name).bind(Json(team)).execute(&mut *tx).await?;
+                for score in &team.scores {
+                    sqlx::query("INSERT INTO competition_scores (username,competition_id,category_id,team_reference,wod_id,result,rank,points,data) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)")
+                        .bind(&username).bind(detail.id).bind(category.id).bind(&team.reference).bind(score.wod_id).bind(&score.result).bind(&score.rank).bind(&score.points).bind(Json(score)).execute(&mut *tx).await?;
+                }
+            }
+        }
+        tx.commit().await?;
+        Ok(())
+    }
+
     pub fn new(pool: PgPool, secret: &str) -> Self {
         let key = Sha256::digest([b"wodbuster-cookie-v1:".as_slice(), secret.as_bytes()].concat());
         Self {

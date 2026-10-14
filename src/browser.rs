@@ -1,11 +1,13 @@
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+mod details_loader;
 
+use crate::competitions::{COMPETITIONS_URL, Competition, CompetitionError, parse_competitions};
 use chromiumoxide::{
     Browser, Page,
     cdp::browser_protocol::{
         input::InsertTextParams,
-        network::Cookie,
-        storage::GetCookiesParams,
+        network::{Cookie, CookieParam, CookieSameSite},
+        storage::{GetCookiesParams, SetCookiesParams},
         target::{CreateBrowserContextParams, CreateTargetParams},
     },
 };
@@ -35,6 +37,26 @@ pub struct AuthCookie {
 }
 
 impl AuthCookie {
+    fn cdp_cookie(&self) -> CookieParam {
+        let mut cookie = CookieParam::new(&self.name, &self.value);
+        cookie.domain = Some(self.domain.clone());
+        cookie.path = Some(self.path.clone());
+        cookie.secure = Some(self.secure);
+        cookie.http_only = Some(self.http_only);
+        cookie.expires = if self.session {
+            None
+        } else {
+            Some(chromiumoxide::cdp::browser_protocol::network::TimeSinceEpoch::new(self.expires))
+        };
+        cookie.same_site = match self.same_site.as_deref() {
+            Some("Strict") => Some(CookieSameSite::Strict),
+            Some("Lax") => Some(CookieSameSite::Lax),
+            Some("None") => Some(CookieSameSite::None),
+            _ => None,
+        };
+        cookie
+    }
+
     pub fn is_valid(&self) -> bool {
         let domain = self.domain.trim_start_matches('.');
         let now = SystemTime::now()
@@ -85,6 +107,72 @@ pub struct ArenaBrowser {
 }
 
 impl ArenaBrowser {
+    pub async fn competitions(
+        &self,
+        cookie: &AuthCookie,
+    ) -> Result<Vec<Competition>, CompetitionError> {
+        if !cookie.is_valid() {
+            return Err(CompetitionError::SessionExpired);
+        }
+        let _permit = self
+            .slots
+            .try_acquire()
+            .map_err(|_| CompetitionError::Busy)?;
+        timeout(Duration::from_secs(60), self.competitions_inner(cookie))
+            .await
+            .map_err(|_| CompetitionError::Timeout)?
+    }
+
+    async fn competitions_inner(
+        &self,
+        cookie: &AuthCookie,
+    ) -> Result<Vec<Competition>, CompetitionError> {
+        let (browser, mut handler) = Browser::connect(self.endpoint.as_str())
+            .await
+            .map_err(|_| CompetitionError::Unavailable)?;
+        let _driver = Driver(tokio::spawn(async move {
+            while let Some(result) = handler.next().await {
+                if result.is_err() {
+                    break;
+                }
+            }
+        }));
+        let context = browser
+            .create_browser_context(CreateBrowserContextParams {
+                dispose_on_detach: Some(true),
+                ..Default::default()
+            })
+            .await
+            .map_err(|_| CompetitionError::Unavailable)?;
+        let result = async {
+            browser
+                .execute(SetCookiesParams {
+                    cookies: vec![cookie.cdp_cookie()],
+                    browser_context_id: Some(context.clone()),
+                })
+                .await
+                .map_err(|_| CompetitionError::Unavailable)?;
+            let page = browser
+                .new_page(
+                    CreateTargetParams::builder()
+                        .url(COMPETITIONS_URL)
+                        .browser_context_id(context.clone())
+                        .build()
+                        .map_err(|_| CompetitionError::Unavailable)?,
+                )
+                .await
+                .map_err(|_| CompetitionError::Unavailable)?;
+            read_competitions(&page).await
+        }
+        .await;
+        let _ = timeout(
+            Duration::from_secs(3),
+            browser.dispose_browser_context(context),
+        )
+        .await;
+        result
+    }
+
     pub fn new(endpoint: Url) -> Self {
         Self {
             endpoint,
@@ -142,6 +230,33 @@ impl ArenaBrowser {
         .await;
         result
     }
+}
+
+async fn read_competitions(page: &Page) -> Result<Vec<Competition>, CompetitionError> {
+    let mut challenge = false;
+    for _ in 0..40 {
+        let status = page.evaluate("({authenticated: !!document.querySelector('a[href*=\"signout.ashx\"]'), ready: location.hostname==='arena.wodbuster.com' && location.pathname==='/mywodbusterarena/competitions.aspx' && !!document.querySelector('.competitions'), login: location.hostname==='wodbuster.com' || !!document.querySelector('input[type=password]'), challenge: document.title.includes('Just a moment')})")
+            .await.map_err(|_| CompetitionError::Unavailable)?
+            .into_value::<serde_json::Value>().map_err(|_| CompetitionError::InvalidPage)?;
+        challenge = status["challenge"] == true;
+        if status["ready"] == true && status["authenticated"] == true {
+            return parse_competitions(
+                &page
+                    .content()
+                    .await
+                    .map_err(|_| CompetitionError::Unavailable)?,
+            );
+        }
+        if status["login"] == true && !challenge {
+            return Err(CompetitionError::SessionExpired);
+        }
+        sleep(Duration::from_millis(500)).await;
+    }
+    Err(if challenge {
+        CompetitionError::Verification
+    } else {
+        CompetitionError::InvalidPage
+    })
 }
 
 async fn authenticate(

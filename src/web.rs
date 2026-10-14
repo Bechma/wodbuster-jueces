@@ -15,7 +15,10 @@ use topcoat::{
     view::{View, view},
 };
 use uuid::Uuid;
+mod competition_view;
+mod layout;
 
+use crate::competitions::CompetitionError;
 use crate::{AppState, browser::LoginError};
 
 const SESSION_COOKIE: &str = "wb_session";
@@ -23,8 +26,16 @@ const CSRF_COOKIE: &str = "wb_csrf";
 
 pub fn router(state: AppState) -> Router {
     Router::builder()
+        .layout(layout::app_layout)
         .page(home)
         .route(login)
+        .page(my_competitions)
+        .route(load_competitions)
+        .route(refresh_competitions)
+        .page(competition_view::detail_page)
+        .route(competition_view::load_detail)
+        .route(competition_view::refresh_detail)
+        .route(competition_view::delete_competition)
         .cookies()
         .app_context(state)
         .build()
@@ -43,12 +54,7 @@ async fn home(cx: &Cx, Form(query): Form<PageQuery>) -> Result<impl View> {
         Some(id) => state.store.load(id).await?,
         None => None,
     };
-    let csrf = cookies(cx)
-        .signed(&state.cookie_key)
-        .get(CSRF_COOKIE)
-        .map(|cookie| cookie.value().to_owned())
-        .unwrap_or_else(|| Uuid::new_v4().to_string());
-    set_cookie(cx, state, CSRF_COOKIE, csrf.clone());
+    let csrf = csrf_token(cx, state);
     let error = match query.error.as_deref() {
         Some("credentials") => {
             Some("No se pudo iniciar sesión. Comprueba tu usuario y contraseña.")
@@ -63,51 +69,37 @@ async fn home(cx: &Cx, Form(query): Form<PageQuery>) -> Result<impl View> {
             Some("No se pudo conectar con WodBuster o con el navegador. Vuelve a intentarlo.")
         }
         Some("empty") => Some("Introduce tu usuario y contraseña."),
+        Some("session") => Some("La sesión de WodBuster ha caducado. Inicia sesión de nuevo."),
         _ => None,
     };
+    layout::configure(cx, "Acceso", false, None);
     Ok(view! {
-        <!DOCTYPE html>
-        <html lang="es">
-            <head>
-                <meta charset="utf-8">
-                <meta name="viewport" content="width=device-width, initial-scale=1">
-                <title>"Acceso · WodBuster Jueces"</title>
-                <style>(include_str!("style.css"))</style>
-            </head>
-            <body>
-                <main>
-                    <p class="brand">"WODBUSTER / JUECES"</p>
-                    <section class="card" aria-labelledby="title">
-                        if let Some(session) = session {
-                            <p class="eyebrow">"SESIÓN GUARDADA"</p>
-                            <h1 id="title">"Acceso completado"</h1>
-                            <p>"Has accedido con " <strong>(session.username)</strong> "."</p>
-                            <div class="notice success" role="status">
-                                "La cookie .WBAuth está guardada para las próximas operaciones en Arena."
-                            </div>
-                        } else {
-                            <p class="eyebrow">"WODBUSTER ARENA"</p>
-                            <h1 id="title">"Inicia sesión"</h1>
-                            <p class="intro">"Introduce tus credenciales de WodBuster para conectar con Arena."</p>
-                            if let Some(error) = error {
-                                <div class="notice error" role="alert">(error)</div>
-                            }
-                            <form method="post" action="/login">
-                                <input type="hidden" name="csrf" value=(csrf)>
-                                <label for="username">"Usuario / email"</label>
-                                <input id="username" name="username" type="text" autocomplete="username"
-                                    placeholder="Tu email de WodBuster" required="" maxlength="320" autofocus="">
-                                <label for="password">"Contraseña"</label>
-                                <input id="password" name="password" type="password" autocomplete="current-password"
-                                    placeholder="Tu contraseña" required="" maxlength="1024">
-                                <button type="submit">"Acceder y guardar sesión"</button>
-                            </form>
-                            <p class="footnote">"La contraseña no se guarda. La cookie de acceso se almacena cifrada."</p>
-                        }
-                    </section>
-                </main>
-            </body>
-        </html>
+        if let Some(session) = session {
+            <p class="eyebrow">"SESIÓN GUARDADA"</p>
+            <h1 id="title">"Acceso completado"</h1>
+            <p>"Has accedido con " <strong>(session.username)</strong> "."</p>
+            <form method="get" action="/competitions">
+                <button type="submit">"Mis competiciones"</button>
+            </form>
+        } else {
+            <p class="eyebrow">"WODBUSTER ARENA"</p>
+            <h1 id="title">"Inicia sesión"</h1>
+            <p class="intro">"Introduce tus credenciales de WodBuster para conectar con Arena."</p>
+            if let Some(error) = error {
+                <div class="notice error" role="alert">(error)</div>
+            }
+            <form method="post" action="/login">
+                <input type="hidden" name="csrf" value=(csrf)>
+                <label for="username">"Usuario / email"</label>
+                <input id="username" name="username" type="text" autocomplete="username"
+                    placeholder="Tu email de WodBuster" required="" maxlength="320" autofocus="">
+                <label for="password">"Contraseña"</label>
+                <input id="password" name="password" type="password" autocomplete="current-password"
+                    placeholder="Tu contraseña" required="" maxlength="1024">
+                <button type="submit">"Acceder y guardar sesión"</button>
+            </form>
+            <p class="footnote">"La contraseña no se guarda. La cookie de acceso se almacena cifrada."</p>
+        }
     })
 }
 
@@ -116,6 +108,164 @@ struct LoginForm {
     username: String,
     password: String,
     csrf: String,
+}
+
+#[derive(Deserialize)]
+struct CompetitionsQuery {
+    error: Option<String>,
+    loaded: Option<bool>,
+}
+
+#[page("/competitions")]
+async fn my_competitions(cx: &Cx, Form(query): Form<CompetitionsQuery>) -> Result<impl View> {
+    no_cache(cx);
+    let state: &AppState = app_context(cx);
+    let Some(id) = session_id(cx, state) else {
+        return Err(see_other("/").into());
+    };
+    let Some(session) = state.store.load(id).await? else {
+        return Err(see_other("/").into());
+    };
+    let competitions = state.store.competitions(&session.username).await?;
+    let csrf = csrf_token(cx, state);
+    let error = match query.error.as_deref() {
+        Some("verification") => {
+            Some("WodBuster solicita una verificación adicional. Vuelve a intentarlo.")
+        }
+        Some("timeout") => Some("La carga ha tardado demasiado. Vuelve a intentarlo."),
+        Some("busy") => {
+            Some("Hay otras operaciones en curso. Vuelve a intentarlo en unos segundos.")
+        }
+        Some("storage") => {
+            Some("No se pudo actualizar la lista de competiciones. Vuelve a intentarlo.")
+        }
+        Some("invalid") => Some("No se pudo leer la página de competiciones de WodBuster."),
+        Some("unavailable") => Some("No se pudo conectar con WodBuster o con el navegador."),
+        _ => None,
+    };
+    layout::configure(cx, "Mis competiciones", false, Some(layout::Back::HOME));
+    Ok(view! {
+        <p class="eyebrow">"WODBUSTER ARENA"</p>
+        <h1 id="title">"Mis competiciones"</h1>
+        if let Some(error) = error {
+            <div class="notice error" role="alert">(error)</div>
+        }
+        if competitions.is_empty() {
+            <p class="intro">
+                if query.loaded == Some(true) {
+                    "No hay competiciones en las que seas juez o administrador."
+                } else {
+                    "Todavía no hay competiciones guardadas."
+                }
+            </p>
+            <form method="post" action="/competitions/load">
+                <input type="hidden" name="csrf" value=(csrf.clone())>
+                <button type="submit">"Cargar"</button>
+            </form>
+        } else {
+            <ul class="competition-list">
+                for competition in competitions {
+                    <li class="competition-row">
+                        <span>(competition.name.clone())</span>
+                        <div class="competition-actions">
+                            <a class="button small" href=(format!("/competitions/{}",competition.id))>"Ver competicion"</a>
+                            <form method="post" action=(format!("/competitions/{}/delete",competition.id))>
+                                <input type="hidden" name="csrf" value=(csrf.clone())>
+                                <button type="submit" class="small danger" aria-label=(format!("Borrar {}",competition.name))>"Borrar"</button>
+                            </form>
+                        </div>
+                    </li>
+                }
+            </ul>
+        }
+        <form method="post" action="/competitions/refresh">
+            <input type="hidden" name="csrf" value=(csrf.clone())>
+            <button type="submit" class="secondary">"Refrescar"</button>
+        </form>
+    })
+}
+
+#[derive(Deserialize)]
+struct LoadForm {
+    csrf: String,
+}
+
+#[route(POST "/competitions/load")]
+async fn load_competitions(cx: &Cx, Form(form): Form<LoadForm>) -> Result<SeeOther> {
+    sync_competitions(cx, form, false).await
+}
+
+#[route(POST "/competitions/refresh")]
+async fn refresh_competitions(cx: &Cx, Form(form): Form<LoadForm>) -> Result<SeeOther> {
+    sync_competitions(cx, form, true).await
+}
+
+async fn sync_competitions(cx: &Cx, form: LoadForm, refresh: bool) -> Result<SeeOther> {
+    no_cache(cx);
+    let state: &AppState = app_context(cx);
+    let Some(id) = session_id(cx, state) else {
+        return Ok(see_other("/"));
+    };
+    let Some(session) = state.store.load(id).await? else {
+        return Ok(see_other("/"));
+    };
+    if !cookies(cx)
+        .signed(&state.cookie_key)
+        .get(CSRF_COOKIE)
+        .is_some_and(|cookie| cookie.value() == form.csrf)
+    {
+        return Err(forbidden().into());
+    }
+    // Si ya hay datos, se sirve la lista guardada sin volver a consultar Arena.
+    if !refresh
+        && !state
+            .store
+            .competitions(&session.username)
+            .await?
+            .is_empty()
+    {
+        return Ok(see_other("/competitions"));
+    }
+    let competitions = match state.browser.competitions(&session.cookie).await {
+        Ok(competitions) => competitions,
+        Err(CompetitionError::SessionExpired) => {
+            cookies(cx)
+                .signed(&state.cookie_key)
+                .remove(Cookie::build((SESSION_COOKIE, "")).path("/").build());
+            return Ok(see_other("/?error=session"));
+        }
+        Err(error) => {
+            let code = match error {
+                CompetitionError::Verification => "verification",
+                CompetitionError::Timeout => "timeout",
+                CompetitionError::Busy => "busy",
+                CompetitionError::Unavailable => "unavailable",
+                CompetitionError::InvalidPage => "invalid",
+                CompetitionError::AccessDenied => "invalid",
+                CompetitionError::SessionExpired => unreachable!(),
+            };
+            return Ok(see_other(format!("/competitions?error={code}")));
+        }
+    };
+    if state
+        .store
+        .save_competitions(&session.username, &competitions)
+        .await
+        .is_err()
+    {
+        return Ok(see_other("/competitions?error=storage"));
+    }
+    Ok(see_other("/competitions?loaded=true"))
+}
+
+fn csrf_token(cx: &Cx, state: &AppState) -> String {
+    let csrf = cookies(cx)
+        .signed(&state.cookie_key)
+        .get(CSRF_COOKIE)
+        .map(|cookie| cookie.value().to_owned())
+        .unwrap_or_else(|| Uuid::new_v4().to_string());
+    set_cookie(cx, state, CSRF_COOKIE, csrf.clone());
+    csrf
 }
 
 #[route(POST "/login")]

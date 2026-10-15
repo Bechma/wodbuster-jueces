@@ -150,16 +150,15 @@ async fn run_locked(state: &AppState, connection: &mut PgConnection) -> anyhow::
         // Si se pierde la sesión que posee el lock se cancela la operación en curso.
         let work = async {
             if let Some(photo) = state.store.claim_photo().await? {
-                let id = photo.id;
                 let failure_state = if photo.state == "submitting" {
                     "unconfirmed"
                 } else {
                     "failed"
                 };
-                if let Err(error) = process(state, photo).await {
+                if let Err(error) = process(state, &photo).await {
                     state
                         .store
-                        .fail_photo(id, failure_state, &error.to_string())
+                        .fail_photo(&photo, failure_state, &error.to_string())
                         .await?;
                 }
             } else {
@@ -178,7 +177,7 @@ async fn run_locked(state: &AppState, connection: &mut PgConnection) -> anyhow::
     }
 }
 
-async fn process(state: &AppState, photo: Photo) -> anyhow::Result<()> {
+async fn process(state: &AppState, photo: &Photo) -> anyhow::Result<()> {
     let detail = state
         .store
         .competition_detail(&photo.username, photo.competition_id)
@@ -193,14 +192,14 @@ async fn process(state: &AppState, photo: Photo) -> anyhow::Result<()> {
             .context("Foto no disponible")?;
         let reading = crate::ai::extract(bytes, &detail, &photo.model).await?;
         let result = evaluate_reading(&detail, reading);
-        state.store.parsed_photo(photo.id, &result).await?;
+        state.store.parsed_photo(photo, &result).await?;
         return Ok(());
     }
     let reading: ScorecardReading =
-        serde_json::from_value(photo.reading.context("Falta la lectura de IA")?)?;
+        serde_json::from_value(photo.reading.clone().context("Falta la lectura de IA")?)?;
     let prepared = evaluate_reading(&detail, reading);
     let Some(plan) = &prepared.prepared else {
-        state.store.parsed_photo(photo.id, &prepared).await?;
+        state.store.parsed_photo(photo, &prepared).await?;
         return Ok(());
     };
     let session = state
@@ -225,22 +224,12 @@ async fn process(state: &AppState, photo: Photo) -> anyhow::Result<()> {
         break result;
     };
     match submission {
-        Ok(score) => {
-            // Persistir la confirmación remota antes de actualizar la caché local.
-            state
-                .store
-                .finish_photo(photo.id, "saved_local_failed", None, Some(&score))
-                .await?;
-            match state.store.save_confirmed_score(&photo.username,photo.competition_id,plan.category_id,&plan.team_reference,&score).await {
-                Ok(())=>state.store.finish_photo(photo.id,"succeeded",None,Some(&score)).await?,
-                Err(_)=>state.store.finish_photo(photo.id,"saved_local_failed",Some("Arena confirmó la puntuación, pero falló su copia local. Refresca la competición; no repitas el envío."),Some(&score)).await?,
-            }
-        }
+        Ok(score) => persist_confirmed_photo(&state.store, photo, plan, &score).await?,
         Err(error) => {
             state
                 .store
                 .finish_photo(
-                    photo.id,
+                    photo,
                     if error.save_attempted {
                         "unconfirmed"
                     } else {
@@ -249,8 +238,27 @@ async fn process(state: &AppState, photo: Photo) -> anyhow::Result<()> {
                     Some(&error.to_string()),
                     None,
                 )
-                .await?
+                .await?;
         }
+    }
+    Ok(())
+}
+
+async fn persist_confirmed_photo(
+    store: &crate::storage::SessionStore,
+    photo: &Photo,
+    plan: &crate::scorecard::PreparedScore,
+    score: &crate::details::Score,
+) -> anyhow::Result<()> {
+    if !store.confirm_photo(photo, score).await? {
+        return Ok(()); // La revisión ya no pertenece a este worker.
+    }
+    if store
+        .save_confirmed_photo_score(photo, plan.category_id, &plan.team_reference, score)
+        .await
+        .is_err()
+    {
+        store.fail_photo(photo, "saved_local_failed", "Arena confirmó la puntuación, pero falló su copia local. Refresca la competición; no repitas el envío.").await?;
     }
     Ok(())
 }
@@ -396,7 +404,8 @@ mod tests {
         assert_eq!(job.state, "parsing");
         assert!(store.claim_photo().await?.is_none());
         store.recover_photos().await?;
-        assert_eq!(store.claim_photo().await?.unwrap().state, "parsing");
+        let parsing = store.claim_photo().await?.unwrap();
+        assert_eq!(parsing.state, "parsing");
         let mut detail = support::fixture();
         let fields = json!([{"attributes":{"name":"panel$IoReps","id":"reps"},"options":[]}]);
         detail.categories[0].wods[0].score_format = ScoreFormat::from_fields(&fields);
@@ -412,12 +421,13 @@ mod tests {
         };
         let extracted = evaluate_reading(&detail, reading);
         assert!(extracted.ready_for_form);
-        store.parsed_photo(id, &extracted).await?;
+        store.parsed_photo(&parsing, &extracted).await?;
         let photo = store.photos("one@example.com", 3910, 0).await?.remove(0);
         assert_eq!(photo.model, "test-model");
         assert!(photo.reading.is_some());
         assert!(!photo.warning());
-        assert_eq!(store.claim_photo().await?.unwrap().state, "submitting");
+        let submitting = store.claim_photo().await?.unwrap();
+        assert_eq!(submitting.state, "submitting");
         store.recover_photos().await?;
         assert!(store.claim_photo().await?.is_none());
         assert_eq!(
@@ -425,13 +435,19 @@ mod tests {
             "unconfirmed"
         );
         let score = detail.categories[0].teams[0].scores[0].clone();
-        store
-            .finish_photo(id, "succeeded", None, Some(&score))
-            .await?;
-        assert!(store.photos("one@example.com", 3910, 0).await?[0].warning());
-        store
-            .fail_photo(id, "unconfirmed", "Falló la copia local")
-            .await?;
+        let recovered = store.photo("one@example.com", 3910, id).await?.unwrap();
+        assert!(
+            store
+                .requeue_photo(&recovered, Uuid::nil(), Some(&extracted), "test-model")
+                .await?
+        );
+        let submitting = store.claim_photo().await?.unwrap();
+        assert!(store.confirm_photo(&submitting, &score).await?);
+        assert!(
+            store
+                .fail_photo(&submitting, "unconfirmed", "Falló la copia local")
+                .await?
+        );
         sqlx::query("UPDATE score_photos SET provider='google-gemini' WHERE id=$1")
             .bind(id)
             .execute(&pool)
@@ -452,7 +468,7 @@ mod tests {
         let queued = store.claim_photo().await?.unwrap();
         assert_eq!(queued.state, "submitting");
         assert_eq!(queued.provider, "google-gemini"); // La edición manual no atribuye a otra IA la lectura histórica.
-        assert_eq!(queued.revision, 1);
+        assert_eq!(queued.revision, photo.revision + 1);
         assert_eq!(
             queued.reading.as_ref().unwrap()["score_value"]["repetitions"],
             2
@@ -462,7 +478,7 @@ mod tests {
                 .requeue_photo(&queued, Uuid::nil(), None, "other-model")
                 .await?
         );
-        store.fail_photo(id, "failed", "Before saving").await?;
+        store.fail_photo(&queued, "failed", "Before saving").await?;
         let done = store.photo("one@example.com", 3910, id).await?.unwrap();
         assert_eq!(done.state, "failed"); // No conserva la confirmación de un intento anterior.
         assert!(
@@ -472,7 +488,7 @@ mod tests {
         );
         let parsing = store.claim_photo().await?.unwrap();
         assert_eq!(parsing.state, "parsing");
-        assert_eq!(parsing.revision, 2);
+        assert_eq!(parsing.revision, queued.revision + 1);
         assert_eq!(parsing.model, "new-model");
         assert_eq!(parsing.provider, crate::ai::PROVIDER);
         assert!(parsing.reading.is_none());
@@ -504,3 +520,6 @@ mod tests {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod regression_tests;

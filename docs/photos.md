@@ -34,7 +34,9 @@ corregir lecturas incompletas. Se conserva el modelo que produjo la lectura orig
 Las dos acciones requieren CSRF y pertenencia a la cuenta/competición. Mientras una foto
 está en cola, analizándose o enviándose, sus acciones permanecen bloqueadas. Una revisión
 comparada atómicamente impide que dos peticiones o una pestaña antigua sobrescriban otra
-edición. La consulta automática de estados conserva los cambios sin guardar del formulario.
+edición. Las escrituras del worker también comprueban la revisión y el estado reclamados,
+por lo que un trabajo antiguo no puede sobrescribir una corrección o un nuevo análisis.
+La consulta automática de estados conserva los cambios sin guardar del formulario.
 
 ## Procesamiento
 
@@ -50,7 +52,15 @@ se inicia más de una instancia de la aplicación. Procesa una foto cada vez:
    `ArenaBrowser::submit_score`. Espera si los navegadores de la aplicación están ocupados.
 5. Abre **Edit** cuando corresponde, rellena y guarda únicamente el WOD seleccionado.
    Relee la vista de juez para verificar el resultado y actualiza la puntuación local.
-6. Termina en `succeeded`.
+6. Persiste primero la confirmación remota manteniendo `submitting` y las acciones
+   bloqueadas. Actualiza la puntuación local y termina en `succeeded` en una misma
+   transacción; si falla esa copia, termina en `saved_local_failed`.
+
+Al cargar los detalles, los WODs ya guardados se abren con **Edit** para capturar sus
+campos y el control real de **Guardar**. La exploración de formatos nunca guarda
+puntuaciones y conserva los valores originales. Así, refrescar los detalles permite
+seguir preparando correcciones y nuevos envíos de puntuaciones existentes. Los
+snapshots anteriores que solo contienen **Edit** necesitan refrescarse una vez.
 
 Si `needs_retake` es `true`, pero los campos son suficientes y válidos, continúa el envío.
 La galería muestra un aviso cuando Arena confirma el guardado de esa lectura.
@@ -58,8 +68,9 @@ La galería muestra un aviso cuando Arena confirma el guardado de esa lectura.
 `failed` conserva el error de extracción o de un envío que no llegó a guardar.
 `unconfirmed` indica que hay que comprobar Arena antes de repetir el envío.
 `saved_local_failed` conserva la confirmación remota si falta actualizar la caché local.
-Un reinicio reanuda el análisis interrumpido; un envío interrumpido se marca como
-`unconfirmed` y no se repite automáticamente. Una petición de subida repetida con el
+Un reinicio reanuda el análisis interrumpido e invalida la revisión del worker anterior.
+Un envío interrumpido se marca como `unconfirmed` si no hay confirmación persistida,
+o `saved_local_failed` si Arena ya lo confirmó; ninguno se repite automáticamente. Una petición de subida repetida con el
 mismo UUID no duplica la foto ni el trabajo.
 
 Se utiliza la sesión OAuth creada con `cargo run --example chatgpt_login`, guardada en
@@ -74,6 +85,7 @@ que usa la aplicación. El usuario debe haber cargado los detalles de la competi
 cargo test --all-targets
 cargo test --lib photos::tests -- --include-ignored
 cargo test --test photos_web -- --ignored
+cargo test --lib regression_tests -- --ignored
 ```
 
 Las pruebas de integración requieren los servicios de `compose.dev.yml` y `DATABASE_URL`.

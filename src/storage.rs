@@ -175,9 +175,68 @@ impl SessionStore {
             .bind(&username)
             .execute(&mut *tx)
             .await?;
+        Self::write_confirmed_score(
+            &mut tx,
+            &username,
+            competition_id,
+            category_id,
+            team_reference,
+            score,
+        )
+        .await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    /// La copia local y el fin del trabajo pertenecen a la misma revisión y transacción.
+    pub(crate) async fn save_confirmed_photo_score(
+        &self,
+        photo: &crate::photos::Photo,
+        category_id: i64,
+        team_reference: &str,
+        score: &crate::details::Score,
+    ) -> topcoat::Result<bool> {
+        let mut tx = self.pool.begin().await?;
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+            .bind(&photo.username)
+            .execute(&mut *tx)
+            .await?;
+        let active: Option<Uuid> = sqlx::query_scalar(
+            "SELECT id FROM score_photos WHERE id=$1 AND revision=$2 AND state='submitting' AND result IS NOT NULL FOR UPDATE",
+        ).bind(photo.id).bind(photo.revision).fetch_optional(&mut *tx).await?;
+        if active.is_none() {
+            return Ok(false);
+        }
+        Self::write_confirmed_score(
+            &mut tx,
+            &photo.username,
+            photo.competition_id,
+            category_id,
+            team_reference,
+            score,
+        )
+        .await?;
+        sqlx::query(
+            "UPDATE score_photos SET state='succeeded',error=NULL,updated_at=now() WHERE id=$1",
+        )
+        .bind(photo.id)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(true)
+    }
+
+    async fn write_confirmed_score(
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        username: &str,
+        competition_id: i64,
+        category_id: i64,
+        team_reference: &str,
+        score: &crate::details::Score,
+    ) -> topcoat::Result<()> {
         let snapshot = sqlx::query_scalar::<_, Json<CompetitionDetail>>(
             "SELECT snapshot FROM competition_details WHERE username=$1 AND competition_id=$2 FOR UPDATE",
-        ).bind(&username).bind(competition_id).fetch_optional(&mut *tx).await?;
+        ).bind(username).bind(competition_id).fetch_optional(&mut **tx).await?;
         let mut detail = snapshot
             .ok_or_else(|| topcoat::Error::msg("La competición ya no está cargada"))?
             .0;
@@ -198,9 +257,9 @@ impl SessionStore {
         }
         *previous = confirmed.clone();
         let updated = sqlx::query("UPDATE competition_scores SET result=$6, rank=$7, points=$8, data=$9 WHERE username=$1 AND competition_id=$2 AND category_id=$3 AND team_reference=$4 AND wod_id=$5")
-            .bind(&username).bind(competition_id).bind(category_id).bind(team_reference).bind(score.wod_id)
+            .bind(username).bind(competition_id).bind(category_id).bind(team_reference).bind(score.wod_id)
             .bind(&confirmed.result).bind(&confirmed.rank).bind(&confirmed.points).bind(Json(&confirmed))
-            .execute(&mut *tx).await?;
+            .execute(&mut **tx).await?;
         if updated.rows_affected() != 1 {
             return Err(topcoat::Error::msg(
                 "No se encontró la puntuación local para actualizar",
@@ -209,12 +268,11 @@ impl SessionStore {
         sqlx::query(
             "UPDATE competition_details SET snapshot=$3 WHERE username=$1 AND competition_id=$2",
         )
-        .bind(&username)
+        .bind(username)
         .bind(competition_id)
         .bind(Json(detail))
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await?;
-        tx.commit().await?;
         Ok(())
     }
 

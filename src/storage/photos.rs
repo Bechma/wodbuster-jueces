@@ -82,7 +82,8 @@ impl SessionStore {
     }
 
     pub(crate) async fn recover_photos(&self) -> sqlx::Result<()> {
-        sqlx::query("UPDATE score_photos SET state=CASE WHEN state='parsing' THEN 'queued' ELSE 'unconfirmed' END, error=CASE WHEN state='submitting' THEN 'El servidor se interrumpió durante el envío. Comprueba Arena antes de repetirlo.' ELSE NULL END,updated_at=now() WHERE state IN ('parsing','submitting')")
+        // Invalida también un parser antiguo si la misma foto vuelve a parsing.
+        sqlx::query("UPDATE score_photos SET revision=revision+1,state=CASE WHEN result IS NOT NULL THEN 'saved_local_failed' WHEN state='parsing' THEN 'queued' ELSE 'unconfirmed' END,error=CASE WHEN result IS NOT NULL THEN 'Arena confirmó la puntuación; se interrumpió la actualización local. Refresca la competición; no repitas el envío.' WHEN state='submitting' THEN 'El servidor se interrumpió durante el envío. Comprueba Arena antes de repetirlo.' ELSE NULL END,updated_at=now() WHERE state IN ('parsing','submitting')")
             .execute(&self.pool).await?;
         Ok(())
     }
@@ -95,39 +96,60 @@ impl SessionStore {
 
     pub(crate) async fn parsed_photo(
         &self,
-        id: Uuid,
+        photo: &Photo,
         result: &ExtractionResult,
-    ) -> sqlx::Result<()> {
-        sqlx::query("UPDATE score_photos SET state=$2,reading=$3,prepared=$4,validation_errors=$5,error=NULL,updated_at=now() WHERE id=$1")
-            .bind(id).bind(if result.ready_for_form {"parsed"} else {"incomplete"})
+    ) -> sqlx::Result<bool> {
+        let updated = sqlx::query("UPDATE score_photos SET state=$2,reading=$3,prepared=$4,validation_errors=$5,error=NULL,updated_at=now() WHERE id=$1 AND revision=$6 AND state=$7 AND state IN ('parsing','submitting')")
+            .bind(photo.id).bind(if result.ready_for_form {"parsed"} else {"incomplete"})
             .bind(Json(&result.reading)).bind(result.prepared.as_ref().map(Json))
-            .bind(Json(&result.validation_errors)).execute(&self.pool).await?;
-        Ok(())
+            .bind(Json(&result.validation_errors)).bind(photo.revision).bind(&photo.state)
+            .execute(&self.pool).await?;
+        Ok(updated.rows_affected() == 1)
+    }
+
+    /// Conserva la confirmación remota sin liberar la foto para nuevas ediciones.
+    pub(crate) async fn confirm_photo(
+        &self,
+        photo: &Photo,
+        score: &crate::details::Score,
+    ) -> sqlx::Result<bool> {
+        let updated = sqlx::query("UPDATE score_photos SET result=$3,updated_at=now() WHERE id=$1 AND revision=$2 AND state='submitting'")
+            .bind(photo.id).bind(photo.revision).bind(Json(score))
+            .execute(&self.pool).await?;
+        Ok(updated.rows_affected() == 1)
     }
 
     pub(crate) async fn finish_photo(
         &self,
-        id: Uuid,
+        photo: &Photo,
         state: &str,
         error: Option<&str>,
         score: Option<&crate::details::Score>,
-    ) -> sqlx::Result<()> {
-        sqlx::query(
-            "UPDATE score_photos SET state=$2,error=$3,result=$4,updated_at=now() WHERE id=$1",
+    ) -> sqlx::Result<bool> {
+        let updated = sqlx::query(
+            "UPDATE score_photos SET state=$2,error=$3,result=COALESCE($4,result),updated_at=now() WHERE id=$1 AND revision=$5 AND state=$6 AND state='submitting'",
         )
-        .bind(id)
+        .bind(photo.id)
         .bind(state)
         .bind(error)
         .bind(score.map(Json))
+        .bind(photo.revision)
+        .bind(&photo.state)
         .execute(&self.pool)
         .await?;
-        Ok(())
+        Ok(updated.rows_affected() == 1)
     }
 
-    pub(crate) async fn fail_photo(&self, id: Uuid, state: &str, error: &str) -> sqlx::Result<()> {
+    pub(crate) async fn fail_photo(
+        &self,
+        photo: &Photo,
+        state: &str,
+        error: &str,
+    ) -> sqlx::Result<bool> {
         // Un fallo posterior a la confirmación remota nunca borra esa confirmación.
-        sqlx::query("UPDATE score_photos SET state=CASE WHEN result IS NOT NULL THEN 'saved_local_failed' ELSE $2 END,error=$3,updated_at=now() WHERE id=$1")
-            .bind(id).bind(state).bind(error).execute(&self.pool).await?;
-        Ok(())
+        let updated = sqlx::query("UPDATE score_photos SET state=CASE WHEN result IS NOT NULL THEN 'saved_local_failed' ELSE $2 END,error=$3,updated_at=now() WHERE id=$1 AND revision=$4 AND state=$5 AND state IN ('parsing','submitting')")
+            .bind(photo.id).bind(state).bind(error).bind(photo.revision).bind(&photo.state)
+            .execute(&self.pool).await?;
+        Ok(updated.rows_affected() == 1)
     }
 }

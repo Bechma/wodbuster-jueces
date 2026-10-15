@@ -150,11 +150,11 @@ impl Connection {
         .await;
     }
 
-    /// Cambia únicamente el selector de modo; nunca pulsa los controles de guardar.
-    async fn discover_score_branches(
+    /// Abre Edit y observa ambos modos sin pulsar nunca Guardar.
+    async fn capture_score_form(
         &self,
         url: &str,
-        team: &Team,
+        team: &mut Team,
         wods: &mut BTreeMap<i64, Wod>,
     ) -> Result<(), CompetitionError> {
         let url = Url::parse(url).map_err(|_| CompetitionError::InvalidPage)?;
@@ -165,79 +165,136 @@ impl Connection {
             .goto(url.as_str())
             .await
             .map_err(|_| CompetitionError::Unavailable)?;
-        for value in ["True", "False"] {
-            let script = format!(
-                r#"(()=>{{
-                const selects=[...document.querySelectorAll('select')].filter(e=>e.name.endsWith('$IoComplete'));
-                if (!selects.length) return false;
-                document.documentElement.dataset.scoreSchemaPending='true';
-                const manager=window.Sys?.WebForms?.PageRequestManager?.getInstance();
-                if (manager) {{ const done=()=>{{ document.documentElement.removeAttribute('data-score-schema-pending'); manager.remove_endRequest(done); }}; manager.add_endRequest(done); }}
-                selects.forEach(e=>e.value={value:?});
-                selects[0].dispatchEvent(new Event('change',{{bubbles:true}}));
-                return true;
-            }})()"#
-            );
-            let found = self
-                .page
-                .evaluate(script)
-                .await
-                .map_err(|_| CompetitionError::Unavailable)?
-                .into_value::<bool>()
-                .map_err(|_| CompetitionError::InvalidPage)?;
-            if !found {
-                return Err(CompetitionError::InvalidPage);
-            }
-            let mut ready = false;
-            for _ in 0..60 {
-                sleep(Duration::from_millis(200)).await;
-                ready = self
-                    .page
-                    .evaluate("!document.documentElement.dataset.scoreSchemaPending")
-                    .await
-                    .ok()
-                    .and_then(|v| v.into_value::<bool>().ok())
-                    .unwrap_or(false);
-                if ready {
-                    break;
-                }
-            }
-            if !ready {
-                return Err(CompetitionError::Timeout);
-            }
-            let html = self
-                .page
-                .content()
-                .await
-                .map_err(|_| CompetitionError::Unavailable)?;
-            // No reemplaza los valores originales del equipo por los de la exploración.
-            let mut temporary = team.clone();
-            details::enrich_judge_form(&html, &mut temporary, wods);
-            let suffix = if value == "True" {
-                "$IoTimeMMSS"
-            } else {
-                "$IoReps"
+        capture_score_editors(&self.page, team, wods).await
+    }
+
+    async fn discover_score_branches(
+        &self,
+        url: &str,
+        team: &Team,
+        wods: &mut BTreeMap<i64, Wod>,
+    ) -> Result<(), CompetitionError> {
+        // Los cambios de modo solo enriquecen el esquema, nunca la lectura original.
+        self.capture_score_form(url, &mut team.clone(), wods).await
+    }
+}
+
+async fn capture_score_editors(
+    page: &Page,
+    team: &mut Team,
+    wods: &mut BTreeMap<i64, Wod>,
+) -> Result<(), CompetitionError> {
+    for index in 0..team.scores.len() {
+        let mut current = team.clone();
+        read_score_form(page, &mut current, wods).await?;
+        let wod_name = wods
+            .get(&team.scores[index].wod_id)
+            .ok_or(CompetitionError::InvalidPage)?
+            .name
+            .clone();
+        if submit_control(&current.scores[index], "$CtlSave").is_none() {
+            let Some(edit) = submit_control(&current.scores[index], "$CtlEditar") else {
+                continue;
             };
-            let has_control = |wod: &Wod, suffix: &str| {
-                wod.metadata["score_fields"]
+            schema_command(page, &edit, &wod_name, None).await?;
+            read_score_form(page, &mut current, wods).await?;
+        }
+        if submit_control(&current.scores[index], "$CtlSave").is_none() {
+            return Err(CompetitionError::InvalidPage);
+        }
+        // Conserva los valores del formulario antes de explorar sus ramas.
+        // Los postbacks de otro WOD pueden cerrar un editor ya observado.
+        for key in ["fields", "save_controls"] {
+            team.scores[index].metadata[key] = current.scores[index].metadata[key].clone();
+        }
+        let complete = current.scores[index].metadata["fields"]
+            .as_array()
+            .and_then(|fields| {
+                fields.iter().find(|field| {
+                    crate::scoring::role(field) == crate::scoring::FieldRole::Completed
+                })
+            })
+            .map(|field| field["attributes"].clone());
+        if let Some(complete) = complete {
+            for (value, suffix) in [("True", "$IoTimeMMSS"), ("False", "$IoReps")] {
+                schema_command(page, &complete, &wod_name, Some(value)).await?;
+                read_score_form(page, &mut current, wods).await?;
+                if !current.scores[index].metadata["fields"]
                     .as_array()
                     .is_some_and(|fields| {
-                        fields.iter().any(|f| {
-                            f["attributes"]["name"]
+                        fields.iter().any(|field| {
+                            field["attributes"]["name"]
                                 .as_str()
-                                .is_some_and(|n| n.ends_with(suffix))
+                                .is_some_and(|name| name.ends_with(suffix))
                         })
                     })
-            };
-            if wods
-                .values()
-                .any(|w| has_control(w, "$IoComplete") && !has_control(w, suffix))
-            {
-                return Err(CompetitionError::InvalidPage);
+                {
+                    return Err(CompetitionError::InvalidPage);
+                }
             }
         }
-        Ok(())
     }
+    Ok(())
+}
+
+fn submit_control(score: &Score, suffix: &str) -> Option<Value> {
+    score.metadata["save_controls"]
+        .as_array()?
+        .iter()
+        .find(|control| {
+            control["name"]
+                .as_str()
+                .is_some_and(|name| name.ends_with(suffix))
+        })
+        .cloned()
+}
+
+async fn read_score_form(
+    page: &Page,
+    team: &mut Team,
+    wods: &mut BTreeMap<i64, Wod>,
+) -> Result<(), CompetitionError> {
+    let html = page
+        .content()
+        .await
+        .map_err(|_| CompetitionError::Unavailable)?;
+    details::enrich_judge_form(&html, team, wods);
+    if team.metadata.get("unmatched_score_fields").is_some() {
+        return Err(CompetitionError::InvalidPage);
+    }
+    Ok(())
+}
+
+async fn schema_command(
+    page: &Page,
+    control: &Value,
+    wod_name: &str,
+    value: Option<&str>,
+) -> Result<(), CompetitionError> {
+    let script = format!(
+        "(()=>{{const request={};{} }})()",
+        json!({"control":control,"wod_name":wod_name,"value":value}),
+        include_str!("score_schema.js")
+    );
+    let status = page
+        .evaluate(script)
+        .await
+        .map_err(|_| CompetitionError::Unavailable)?
+        .into_value::<String>()
+        .map_err(|_| CompetitionError::InvalidPage)?;
+    match status.as_str() {
+        "ready" => return Ok(()),
+        "pending" => {}
+        _ => return Err(CompetitionError::InvalidPage),
+    }
+    for _ in 0..60 {
+        sleep(Duration::from_millis(200)).await;
+        if page.evaluate("document.readyState === 'complete' && !document.documentElement.dataset.scoreSchemaPending && !window.Sys?.WebForms?.PageRequestManager?.getInstance()?.get_isInAsyncPostBack()")
+            .await.ok().and_then(|v| v.into_value::<bool>().ok()).unwrap_or(false) {
+            return Ok(());
+        }
+    }
+    Err(CompetitionError::Timeout)
 }
 
 impl ArenaBrowser {
@@ -479,7 +536,15 @@ impl ArenaBrowser {
                 teams[*position].metadata["judge_form_source"] = form.metadata();
                 if form.available() {
                     details::enrich_judge_form(&form.body, &mut teams[*position], &mut wods);
-                    if format_source.is_none() && form.body.contains("IoComplete") {
+                    if teams[*position]
+                        .scores
+                        .iter()
+                        .any(|score| submit_control(score, "$CtlEditar").is_some())
+                    {
+                        connection
+                            .capture_score_form(&form.requested, &mut teams[*position], &mut wods)
+                            .await?;
+                    } else if format_source.is_none() && form.body.contains("IoComplete") {
                         format_source = Some((*position, form.requested.clone()));
                     }
                 }
@@ -623,3 +688,6 @@ mod scoring_tests {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod regression_tests;

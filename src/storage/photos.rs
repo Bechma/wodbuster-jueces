@@ -58,11 +58,12 @@ impl SessionStore {
                 OR COALESCE(error,'')<>'' OR validation_errors<>'[]'::jsonb
                 OR reading->>'needs_retake'='true' OR duplicate_count>1
                 OR sync_status IN ('different','unavailable'))
+            AND (NOT $8::boolean OR sync_status='different')
             ORDER BY score_photos.created_at DESC,id DESC LIMIT 20 OFFSET $3"))
             .bind(username).bind(competition).bind(offset)
             .bind(filter.category_id.map(|id|id.to_string()))
             .bind(filter.wod_id.map(|id|id.to_string()))
-            .bind(&filter.team_reference).bind(filter.issues).fetch_all(&self.pool).await
+            .bind(&filter.team_reference).bind(filter.issues).bind(filter.unsynced).fetch_all(&self.pool).await
     }
 
     pub async fn photo_check_summary(

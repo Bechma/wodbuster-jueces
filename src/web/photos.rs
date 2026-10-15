@@ -121,6 +121,7 @@ pub(super) struct PhotosQuery {
     wod_id: Option<i64>,
     team_reference: Option<String>,
     issues: Option<bool>,
+    unsynced: Option<bool>,
 }
 
 impl PhotosQuery {
@@ -130,6 +131,7 @@ impl PhotosQuery {
             wod_id: self.wod_id,
             team_reference: self.team_reference.clone(),
             issues: self.issues.unwrap_or(false),
+            unsynced: self.unsynced.unwrap_or(false),
         }
     }
 }
@@ -148,6 +150,9 @@ pub(super) fn gallery_location(competition: i64, filter: &PhotoFilter, page: u32
     if filter.issues {
         query.append_pair("issues", "true");
     }
+    if filter.unsynced {
+        query.append_pair("unsynced", "true");
+    }
     query.append_pair("page", &page.to_string());
     format!("/competitions/{competition}/photos?{}", query.finish())
 }
@@ -162,9 +167,13 @@ fn filter_label(
                 bad_request("Selecciona una categoría para filtrar por WOD o equipo").into(),
             );
         }
-        return Ok(filter
-            .issues
-            .then(|| "Fotos sin categorizar o con problemas".to_owned()));
+        let label = match (filter.issues, filter.unsynced) {
+            (true, true) => Some("Fotos con problemas · No sincronizadas con Wodbuster"),
+            (true, false) => Some("Fotos sin categorizar o con problemas"),
+            (false, true) => Some("Fotos no sincronizadas con Wodbuster"),
+            (false, false) => None,
+        };
+        return Ok(label.map(str::to_owned));
     };
     let category = detail
         .and_then(|d| d.categories.iter().find(|c| c.id == category_id))
@@ -172,6 +181,9 @@ fn filter_label(
     let mut names = vec![category.name.as_str()];
     if filter.issues {
         names.push("Sin categorizar o con problemas");
+    }
+    if filter.unsynced {
+        names.push("No sincronizadas con Wodbuster");
     }
     if let Some(id) = filter.wod_id {
         names.push(
@@ -238,6 +250,9 @@ pub(super) async fn gallery(cx: &Cx, Form(query): Form<PhotosQuery>) -> Result<i
         }
         if filter.issues {
             <p class="footnote">"Incluye fotos sin una categoría válida, duplicadas, puntuaciones distintas de Wodbuster, lecturas no comparables, errores, envíos sin confirmar y avisos de revisión de la IA (needs_retake)."</p>
+        }
+        if filter.unsynced {
+            <p class="footnote">"Muestra las puntuaciones que difieren de los últimos datos consultados en Arena. Se utiliza la última foto añadida de cada categoría, WOD y equipo. Pulsa «Comprobar sincronización» en la competición para actualizar la comparación."</p>
         }
         <p class="intro">"Las fotos se procesan en segundo plano y las puntuaciones válidas se guardan automáticamente en Wodbuster."</p>
         <div data-photo-gallery=(status_location) data-photo-context=(context) data-photo-filtered=(filtered.to_string())>

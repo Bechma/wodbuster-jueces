@@ -75,6 +75,13 @@ los valores estructurados del formato, incluidos tiempo, repeticiones, kg y dese
 una puntuación ausente nunca equivale a cero. La comprobación consulta los resultados
 y no guarda puntuaciones en Wodbuster.
 
+**Ver fotos no sincronizadas** abre `/competitions/{id}/photos?unsynced=true`.
+Muestra las diferencias confirmadas con los últimos datos consultados de Arena,
+utilizando la última foto de cada categoría, WOD y equipo. Las lecturas sin comprobar
+o no comparables se consultan en la vista de problemas. El filtro se conserva en la
+paginación y en la actualización automática de estados. Cuando una puntuación pasa
+a coincidir con Arena, su foto sale de esta vista.
+
 Si varias fotos tienen la misma cuenta, competición, categoría, WOD y equipo, todas
 figuran como problemáticas. Se compara únicamente la última por `created_at` (con
 `id` como desempate estable); editar una foto antigua no la convierte en la última.

@@ -93,6 +93,7 @@ pub(super) async fn detail_page(cx: &Cx, Form(query): Form<PageQuery>) -> Result
                     <input type="hidden" name="csrf" value=(csrf.clone())>
                     <button type="submit" class="secondary" data-load-trigger="" disabled=(loading)>"Comprobar sincronización"</button>
                 </form>
+                <a class="button photo-unsynced" href=(photos::gallery_location(id, &PhotoFilter { unsynced: true, ..Default::default() }, 0))>"Ver fotos no sincronizadas"</a>
             </div>
         </div>
         if !has_snapshot { <p class="footnote">"Carga los detalles de la competición para enviar fotos."</p> }

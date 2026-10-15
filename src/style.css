@@ -35,6 +35,7 @@ button.danger:enabled:hover { background:#f9dfdc; }
 .button { display:inline-block; padding:12px 16px; border-radius:8px; background:#087b77; color:white; text-decoration:none; text-align:center; font-size:13px; font-weight:700; }
 .button.small { padding:8px 12px; white-space:nowrap; }
 button.secondary { background:#e9f2f1; color:#087b77; }
+button.secondary:enabled:hover { background:#d7e8e6; color:#076460; }
 .top-navigation { margin-bottom:24px; }
 .top-navigation button { margin-top:0; }
 main.competition-detail { max-width:960px; }
@@ -58,6 +59,7 @@ dialog button { margin-top:12px !important; }
 .photo-actions .button { padding:14px 16px; }
 .photo-tools { flex:1; min-width:min(100%,300px); display:grid; grid-template-columns:auto minmax(0,1fr); gap:8px 12px; }
 .photo-tools form { grid-column:1 / -1; min-width:0; }
+.photo-tools .photo-unsynced { grid-column:1 / -1; }
 .photo-check-summary p { margin:8px 0 0; }
 .photo-card-actions { display:flex; align-items:center; gap:8px; flex:none; }
 .photo-card-actions > button { width:auto; margin:0; padding:8px 10px; }

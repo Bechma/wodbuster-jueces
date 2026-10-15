@@ -20,6 +20,7 @@ pub struct PhotoFilter {
     pub wod_id: Option<i64>,
     pub team_reference: Option<String>,
     pub issues: bool,
+    pub unsynced: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize, sqlx::FromRow)]

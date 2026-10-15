@@ -120,6 +120,15 @@ async fn scores_duplicates_latest_photo_and_explicit_deletion_are_consistent(
     assert_eq!(summary.synced, 5);
     assert_eq!(summary.different, 1);
     assert_eq!(summary.unavailable, 1);
+    let unsynced = PhotoFilter {
+        unsynced: true,
+        ..Default::default()
+    };
+    let different = store
+        .filtered_photos("judge@example.com", 3910, 0, &unsynced)
+        .await?;
+    assert_eq!(different.len(), 1);
+    assert_eq!(different[0].id, ids[5]);
 
     // Un cambio de Arena se detecta tras refrescar su detalle; no se modifica la foto.
     detail.categories[3].teams[0].scores[0].result = Some("1reps".into());
@@ -188,6 +197,20 @@ async fn scores_duplicates_latest_photo_and_explicit_deletion_are_consistent(
         6
     );
 
+    let different = store
+        .filtered_photos("judge@example.com", 3910, 0, &unsynced)
+        .await?;
+    assert_eq!(different.len(), 3);
+    assert!(
+        different
+            .iter()
+            .all(|p| [latest, ids[3], ids[5]].contains(&p.id))
+    );
+    assert!(
+        different
+            .iter()
+            .all(|p| p.is_latest && p.sync_status == "different")
+    );
     let latest_photo = store
         .photo("judge@example.com", 3910, latest)
         .await?
@@ -206,6 +229,11 @@ async fn scores_duplicates_latest_photo_and_explicit_deletion_are_consistent(
     assert!(remaining[0].is_latest);
     assert_eq!(remaining[0].sync_status, "synced");
     assert!(remaining.iter().all(|p| p.duplicate_count == 25));
+    let different = store
+        .filtered_photos("judge@example.com", 3910, 0, &unsynced)
+        .await?;
+    assert_eq!(different.len(), 2);
+    assert!(different.iter().all(|p| [ids[3], ids[5]].contains(&p.id)));
     assert_eq!(
         store
             .competition_detail("judge@example.com", 3910)

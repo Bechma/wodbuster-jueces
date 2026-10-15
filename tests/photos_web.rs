@@ -84,6 +84,7 @@ async fn uploads_are_private_idempotent_and_gallery_shows_extraction_warnings(
         assert!(detail.contains("Tomar foto")&&detail.contains("capture=\"environment\"")&&detail.contains("Ver fotos"));
         assert!(detail.contains("Fotos sin categorizar o con problemas")&&detail.contains("issues=true&amp;page=0"));
         assert!(detail.contains("Comprobar sincronización")&&detail.contains("/competitions/3910/check-sync"));
+        assert!(detail.contains("Ver fotos no sincronizadas")&&detail.contains("unsynced=true&amp;page=0"));
         for label in ["Ver fotos por categoría", "Ver fotos por WOD", "Ver fotos por equipo"] { assert!(detail.contains(label)); }
         for query in ["category_id=16907&amp;page=0", "category_id=16907&amp;wod_id=64459&amp;page=0", "category_id=16907&amp;team_reference=298682&amp;page=0"] { assert!(detail.contains(query), "{query}"); }
         let image=include_bytes!("../examples/poc_agent.png").to_vec();
@@ -116,6 +117,16 @@ async fn uploads_are_private_idempotent_and_gallery_shows_extraction_warnings(
         let status:serde_json::Value=serde_json::from_str(&client.get(format!("{base}/competitions/3910/photos/status")).header("Cookie",&headers).send().await?.text().await?)?;
         assert_eq!(status[0]["warning"],true);assert_eq!(status[0]["reading"],reading);
         assert!(status[0].get("session_id").is_none());
+        let sync_url=format!("{base}/competitions/3910/photos/status?unsynced=true");
+        let synced:serde_json::Value=serde_json::from_str(&client.get(&sync_url).header("Cookie",&headers).send().await?.text().await?)?;
+        assert!(synced.as_array().unwrap().is_empty());
+        sqlx::query("UPDATE score_photos SET reading=jsonb_set(reading,'{score_value,repetitions}','3') WHERE id=$1").bind(photo_id).execute(&pool).await?;
+        let mismatch:serde_json::Value=serde_json::from_str(&client.get(&sync_url).header("Cookie",&headers).send().await?.text().await?)?;
+        assert_eq!(mismatch.as_array().unwrap().len(),1);assert_eq!(mismatch[0]["id"],photo_id.to_string());
+        let mismatched_html=client.get(format!("{base}/competitions/3910/photos?unsynced=true")).header("Cookie",&headers).send().await?.text().await?;
+        assert!(mismatched_html.contains("Fotos no sincronizadas con Wodbuster")&&mismatched_html.contains(&photo_id.to_string()));
+        assert!(mismatched_html.contains("/photos/status?unsynced=true&amp;page=0")&&mismatched_html.contains("data-photo-filtered=\"true\""));
+        sqlx::query("UPDATE score_photos SET reading=$2 WHERE id=$1").bind(photo_id).bind(sqlx::types::Json(&reading)).execute(&pool).await?;
         for query in ["category_id=16907", "category_id=16907&wod_id=64459", "category_id=16907&team_reference=298682", "issues=true"] {
             let filtered_html=client.get(format!("{base}/competitions/3910/photos?{query}")).header("Cookie",&headers).send().await?.text().await?;
             assert!(filtered_html.contains("data-photo-filtered=\"true\"")&&filtered_html.contains(&photo_id.to_string()));

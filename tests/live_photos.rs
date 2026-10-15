@@ -46,7 +46,7 @@ async fn photo_upload_is_parsed_and_submitted_by_the_single_worker() -> anyhow::
         .text("capture_id", photo.to_string())
         .part(
             "photo",
-            Part::bytes(include_bytes!("../examples/poc_agent.png").to_vec())
+            Part::bytes(std::fs::read("examples/poc_agent.png")?)
                 .file_name("poc.png")
                 .mime_str("image/png")?,
         );

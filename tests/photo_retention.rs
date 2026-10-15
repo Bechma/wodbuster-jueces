@@ -29,7 +29,7 @@ async fn migration_deletion_and_refresh_preserve_every_photo_and_its_processing_
     store
         .save_competition_detail("judge@example.com", &support::fixture())
         .await?;
-    let image = include_bytes!("../examples/poc_agent.png");
+    let image = include_bytes!("fixtures/image.png");
     let states = [
         "queued",
         "parsing",

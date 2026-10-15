@@ -87,7 +87,7 @@ async fn uploads_are_private_idempotent_and_gallery_shows_extraction_warnings(
         assert!(detail.contains("Ver fotos no sincronizadas")&&detail.contains("unsynced=true&amp;page=0"));
         for label in ["Ver fotos por categoría", "Ver fotos por WOD", "Ver fotos por equipo"] { assert!(detail.contains(label)); }
         for query in ["category_id=16907&amp;page=0", "category_id=16907&amp;wod_id=64459&amp;page=0", "category_id=16907&amp;team_reference=298682&amp;page=0"] { assert!(detail.contains(query), "{query}"); }
-        let image=include_bytes!("../examples/poc_agent.png").to_vec();
+        let image=include_bytes!("fixtures/image.png").to_vec();
         let photo_id=Uuid::new_v4();
         let upload=|csrf:&str,id:Uuid|Form::new().text("csrf",csrf.to_string()).text("capture_id",id.to_string()).part("photo",Part::bytes(image.clone()).file_name("photo.png").mime_str("image/png").unwrap());
         let denied=client.post(format!("{base}/competitions/3910/photos")).header("Cookie",&headers).multipart(upload("forged",photo_id)).send().await?;

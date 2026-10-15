@@ -316,7 +316,7 @@ mod tests {
 
     #[test]
     fn images_are_decoded_and_bounded() {
-        let bytes = include_bytes!("../examples/poc_agent.png");
+        let bytes = include_bytes!("../tests/fixtures/image.png");
         assert_eq!(validate_image(bytes).unwrap().0, "image/png");
         assert!(validate_image(b"not an image").is_err());
         assert!(validate_image(&bytes[..20]).is_err());
@@ -412,7 +412,7 @@ mod tests {
         first.close().await?;
         let second = store.photo_worker_lock().await?.unwrap();
         let id = Uuid::new_v4();
-        let bytes = include_bytes!("../examples/poc_agent.png");
+        let bytes = include_bytes!("../tests/fixtures/image.png");
         let (_, w, h) = validate_image(bytes)?;
         for _ in 0..2 {
             store

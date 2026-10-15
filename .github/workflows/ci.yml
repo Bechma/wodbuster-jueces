@@ -1,0 +1,92 @@
+name: CI
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/postgres
+  BROWSER_URL: ws://127.0.0.1:30000/chromium
+  BROWSER_TOKEN: ci-browser-token
+  SESSION_SECRET: ci-session-secret-for-isolated-tests-only
+  COOKIE_SECURE: 'false'
+
+jobs:
+  quality:
+    name: Tests, Clippy and formatting
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    services:
+      postgres:
+        image: postgres:latest
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+      browserless:
+        image: ghcr.io/browserless/chromium:latest
+        env:
+          TOKEN: ci-browser-token
+          CONCURRENT: '2'
+          TIMEOUT: '120000'
+          HEALTH: 'true'
+        ports:
+          - 30000:3000
+        options: >-
+          --health-cmd "curl -fsS -H 'Authorization: Bearer ci-browser-token' http://127.0.0.1:3000/active"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 12
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install stable Rust, Clippy and rustfmt
+        run: |
+          rustup toolchain install stable --profile minimal --component clippy,rustfmt
+          rustup default stable
+
+      - uses: Swatinem/rust-cache@v2.9.2
+        with:
+          shared-key: ci
+          cache-on-failure: true
+          save-if: ${{ github.event_name == 'push' && github.ref_name == github.event.repository.default_branch }}
+
+      - name: Lint formatting
+        run: cargo fmt --all -- --check
+
+      - name: Clippy
+        run: cargo clippy --locked --all-targets --all-features -- -D warnings
+
+      - name: Unit tests and examples
+        run: cargo test --locked --all-targets --all-features
+
+      - name: Postgres and Browserless integration tests
+        run: |
+          cargo test --locked --lib photos:: -- --ignored --test-threads=1
+          cargo test --locked --lib loads:: -- --ignored --test-threads=1
+          cargo test --locked --lib browserless_login_fixture -- --ignored
+          cargo test --locked --lib refreshed_saved_and_unsaved_scores_prepare_without_saving_or_changing_original_values -- --ignored
+          cargo test --locked --lib executes_conditional_fields_and_saves_only_the_selected_wod -- --ignored
+          cargo test --locked \
+            --test storage --test details_storage --test score_submission_storage \
+            --test photo_filters --test photo_retention --test photo_sync \
+            --test photos_web --test web -- --ignored --test-threads=1

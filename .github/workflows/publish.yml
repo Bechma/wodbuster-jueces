@@ -13,40 +13,51 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  publish:
+  build:
     if: >-
       github.event.workflow_run.conclusion == 'success' &&
       github.event.workflow_run.event == 'push' &&
       github.event.workflow_run.head_repository.full_name == github.repository &&
       github.event.workflow_run.head_branch == github.event.repository.default_branch
-    runs-on: ubuntu-latest
+    name: Build and check ${{ matrix.arch }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-latest
+            cache: wodbuster-release
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+            cache: wodbuster-release-arm64
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
     permissions:
       contents: read
       packages: write
+    services:
+      postgres:
+        image: postgres:latest
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        ports: [5432:5432]
+        options: >-
+          --health-cmd "pg_isready -U postgres -d postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
     steps:
       - uses: actions/checkout@v7.0.1
         with:
           ref: ${{ github.event.workflow_run.head_sha }}
           persist-credentials: false
 
-      - name: Image tags
+      - name: Image name
         id: image
-        env:
-          GH_TOKEN: ${{ github.token }}
-          TESTED_SHA: ${{ github.event.workflow_run.head_sha }}
-          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
         run: |
-          image="ghcr.io/${GITHUB_REPOSITORY,,}"
-          current_sha=$(gh api "repos/${GITHUB_REPOSITORY}/commits/${DEFAULT_BRANCH}" --jq .sha)
-          {
-            echo 'tags<<TAGS'
-            echo "${image}:sha-${TESTED_SHA}"
-            if [[ "$TESTED_SHA" == "$current_sha" ]]; then
-              echo "${image}:latest"
-            fi
-            echo 'TAGS'
-          } >> "$GITHUB_OUTPUT"
+          echo "name=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
 
       - uses: docker/setup-buildx-action@v4.4.1
 
@@ -56,17 +67,114 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build release and publish
+      - name: Build release and push by digest
+        id: build
         uses: docker/build-push-action@v7.4.0
         with:
           context: .
           file: Dockerfile
-          platforms: linux/amd64
+          platforms: linux/${{ matrix.arch }}
           pull: true
-          push: true
-          tags: ${{ steps.image.outputs.tags }}
+          outputs: type=image,name=${{ steps.image.outputs.name }},push-by-digest=true,name-canonical=true,push=true
           labels: |
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
             org.opencontainers.image.revision=${{ github.event.workflow_run.head_sha }}
-          cache-from: type=gha,scope=wodbuster-release
-          cache-to: type=gha,scope=wodbuster-release,mode=max
+          cache-from: type=gha,scope=${{ matrix.cache }}
+          cache-to: type=gha,scope=${{ matrix.cache }},mode=max
+
+      - name: Check native image startup and migrations
+        env:
+          IMAGE: ${{ steps.image.outputs.name }}@${{ steps.build.outputs.digest }}
+          EXPECTED_ARCH: ${{ matrix.arch }}
+          TESTED_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          docker pull "$IMAGE"
+          test "$(docker image inspect "$IMAGE" --format '{{.Architecture}}')" = "$EXPECTED_ARCH"
+          test "$(docker image inspect "$IMAGE" --format '{{.Config.User}}')" = '10001:10001'
+          test "$(docker image inspect "$IMAGE" --format '{{index .Config.Labels "org.opencontainers.image.revision"}}')" = "$TESTED_SHA"
+          trap 'docker logs image-smoke; docker rm -f image-smoke' EXIT
+          docker run -d --name image-smoke --network host \
+            -e DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:5432/postgres \
+            -e BROWSER_URL=ws://127.0.0.1:1/chromium \
+            -e BROWSER_TOKEN=smoke-test \
+            -e SESSION_SECRET=isolated-image-smoke-test-secret-at-least-32-bytes \
+            -e HOST=127.0.0.1 -e PORT=3000 "$IMAGE"
+          for attempt in {1..30}; do
+            if curl --fail --silent http://127.0.0.1:3000/ > /tmp/image-smoke.html; then
+              break
+            fi
+            sleep 2
+          done
+          grep -q 'Usuario / email' /tmp/image-smoke.html
+
+      - name: Export validated digest
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          mkdir -p /tmp/digests
+          touch "/tmp/digests/${DIGEST#sha256:}"
+
+      - uses: actions/upload-artifact@v7.0.2
+        with:
+          name: digest-${{ matrix.arch }}
+          path: /tmp/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  publish:
+    name: Publish and verify multi-platform manifest
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/download-artifact@v8.0.2
+        with:
+          pattern: digest-*
+          path: /tmp/digests
+          merge-multiple: true
+
+      - uses: docker/setup-buildx-action@v4.4.1
+
+      - uses: docker/login-action@v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Publish tags and verify both architectures
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TESTED_SHA: ${{ github.event.workflow_run.head_sha }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          image="ghcr.io/${GITHUB_REPOSITORY,,}"
+          current_sha=$(gh api "repos/${GITHUB_REPOSITORY}/commits/${DEFAULT_BRANCH}" --jq .sha)
+          tags=("${image}:sha-${TESTED_SHA}")
+          if [[ "$TESTED_SHA" == "$current_sha" ]]; then
+            tags+=("${image}:latest")
+          fi
+          tag_args=()
+          for tag in "${tags[@]}"; do
+            tag_args+=(--tag "$tag")
+          done
+          sources=()
+          for digest in /tmp/digests/*; do
+            sources+=("${image}@sha256:$(basename "$digest")")
+          done
+          test "${#sources[@]}" -eq 2
+          docker buildx imagetools create "${tag_args[@]}" "${sources[@]}"
+          expected_digest=''
+          for tag in "${tags[@]}"; do
+            docker buildx imagetools inspect "$tag" --raw > /tmp/manifest.json
+            jq -e '[.manifests[].platform | select(.os == "linux") | .architecture] | sort == ["amd64", "arm64"]' /tmp/manifest.json
+            digest="sha256:$(sha256sum /tmp/manifest.json | cut -d ' ' -f 1)"
+            if [[ -n "$expected_digest" ]]; then
+              test "$digest" = "$expected_digest"
+            fi
+            expected_digest="$digest"
+            echo "${tag}@${digest}" >> "$GITHUB_STEP_SUMMARY"
+          done
+          docker buildx imagetools inspect "${tags[0]}"

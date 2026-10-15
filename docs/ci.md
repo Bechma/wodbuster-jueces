@@ -12,7 +12,7 @@ Hay dos workflows:
   configurada en GitHub. Hace checkout del commit que pasó las pruebas y construye
   la aplicación con `cargo build --release --locked` dentro de Docker.
 
-La imagen Linux amd64 se publica como:
+La imagen incluye `linux/amd64` y `linux/arm64` en un mismo manifiesto y se publica como:
 
 ```text
 ghcr.io/bechma/wodbuster-jueces:latest
@@ -30,6 +30,15 @@ El Dockerfile separa las dependencias con `cargo-chef` para reutilizar su compil
 cuando cambia el código. Buildx restaura y exporta las capas mediante caché de GitHub
 Actions (`type=gha`, `mode=max`). Los servicios y las imágenes base usan `:latest`;
 la publicación utiliza `pull: true` para resolver las imágenes base actuales.
+
+Las dos arquitecturas se construyen en paralelo en runners nativos de GitHub:
+`ubuntu-latest` para amd64 y `ubuntu-24.04-arm` para arm64. Cada una tiene su propia
+caché. Antes de publicar las etiquetas, cada runner arranca su imagen con un
+Postgres vacío y comprueba las migraciones, la página de acceso, la arquitectura,
+el usuario y la revisión del binario. No se accede a Arena ni a la IA.
+Solo cuando ambas comprobaciones pasan se combinan los digests en el índice OCI.
+El último job comprueba que contiene ambas plataformas y que las etiquetas
+publicadas apuntan al mismo digest, que queda en el resumen de la ejecución.
 
 ## Imagen y configuración
 
@@ -56,4 +65,5 @@ docker build --pull -t wodbuster-jueces:local .
 
 Referencias: [evento workflow_run](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#workflow_run),
 [caché de Docker en GitHub Actions](https://docs.docker.com/build/ci/github-actions/cache/),
+[imágenes multiplataforma](https://docs.docker.com/build/ci/github-actions/multi-platform/),
 [cargo-chef](https://github.com/LukeMathWalker/cargo-chef).

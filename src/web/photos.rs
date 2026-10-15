@@ -1,5 +1,5 @@
 use super::*;
-use crate::photos::{NewPhoto, Photo};
+use crate::photos::{NewPhoto, Photo, PhotoFilter};
 use serde::Serialize;
 use topcoat::{
     router::{
@@ -11,7 +11,7 @@ use topcoat::{
     view::component,
 };
 mod editor;
-pub(super) use editor::{edit_photo, refresh_photo};
+pub(super) use editor::{delete_photo, edit_photo, refresh_photo};
 
 fn competition_id(cx: &Cx) -> Result<i64> {
     path_param_segment(cx, "competition_id")
@@ -117,6 +117,83 @@ pub(super) async fn upload(cx: &Cx, mut body: Multipart) -> Result<Json<Uploaded
 #[derive(Deserialize)]
 pub(super) struct PhotosQuery {
     page: Option<u32>,
+    category_id: Option<i64>,
+    wod_id: Option<i64>,
+    team_reference: Option<String>,
+    issues: Option<bool>,
+}
+
+impl PhotosQuery {
+    fn filter(&self) -> PhotoFilter {
+        PhotoFilter {
+            category_id: self.category_id,
+            wod_id: self.wod_id,
+            team_reference: self.team_reference.clone(),
+            issues: self.issues.unwrap_or(false),
+        }
+    }
+}
+
+pub(super) fn gallery_location(competition: i64, filter: &PhotoFilter, page: u32) -> String {
+    let mut query = url::form_urlencoded::Serializer::new(String::new());
+    if let Some(id) = filter.category_id {
+        query.append_pair("category_id", &id.to_string());
+    }
+    if let Some(id) = filter.wod_id {
+        query.append_pair("wod_id", &id.to_string());
+    }
+    if let Some(reference) = &filter.team_reference {
+        query.append_pair("team_reference", reference);
+    }
+    if filter.issues {
+        query.append_pair("issues", "true");
+    }
+    query.append_pair("page", &page.to_string());
+    format!("/competitions/{competition}/photos?{}", query.finish())
+}
+
+fn filter_label(
+    filter: &PhotoFilter,
+    detail: Option<&crate::details::CompetitionDetail>,
+) -> Result<Option<String>> {
+    let Some(category_id) = filter.category_id else {
+        if filter.wod_id.is_some() || filter.team_reference.is_some() {
+            return Err(
+                bad_request("Selecciona una categoría para filtrar por WOD o equipo").into(),
+            );
+        }
+        return Ok(filter
+            .issues
+            .then(|| "Fotos sin categorizar o con problemas".to_owned()));
+    };
+    let category = detail
+        .and_then(|d| d.categories.iter().find(|c| c.id == category_id))
+        .ok_or_else(not_found)?;
+    let mut names = vec![category.name.as_str()];
+    if filter.issues {
+        names.push("Sin categorizar o con problemas");
+    }
+    if let Some(id) = filter.wod_id {
+        names.push(
+            &category
+                .wods
+                .iter()
+                .find(|w| w.id == id)
+                .ok_or_else(not_found)?
+                .name,
+        );
+    }
+    if let Some(reference) = &filter.team_reference {
+        names.push(
+            &category
+                .teams
+                .iter()
+                .find(|t| t.reference == *reference)
+                .ok_or_else(not_found)?
+                .name,
+        );
+    }
+    Ok(Some(names.join(" · ")))
 }
 
 #[page("/competitions/{competition_id}/photos")]
@@ -126,16 +203,26 @@ pub(super) async fn gallery(cx: &Cx, Form(query): Form<PhotosQuery>) -> Result<i
     let (_, session) = account(cx, competition).await?;
     let state: &AppState = app_context(cx);
     let page = query.page.unwrap_or(0);
-    let photos = state
-        .store
-        .photos(&session.username, competition, i64::from(page) * 20)
-        .await?;
+    let filter = query.filter();
     let csrf = csrf_token(cx, state);
     let detail = state
         .store
         .competition_detail(&session.username, competition)
         .await?;
     let context = editor::context(detail.as_ref());
+    let label = filter_label(&filter, detail.as_ref())?;
+    let filtered = label.is_some();
+    let photos = state
+        .store
+        .filtered_photos(
+            &session.username,
+            competition,
+            i64::from(page) * 20,
+            &filter,
+        )
+        .await?;
+    let status_location =
+        gallery_location(competition, &filter, page).replace("/photos?", "/photos/status?");
     layout::configure(
         cx,
         "Fotos y puntuaciones",
@@ -145,14 +232,23 @@ pub(super) async fn gallery(cx: &Cx, Form(query): Form<PhotosQuery>) -> Result<i
     Ok(view! {
         <p class="eyebrow">"PUNTUACIONES CON IA"</p>
         <h1 id="title">"Fotos y estado"</h1>
+        if let Some(label) = label {
+            <p class="photo-filter-label">(label)</p>
+            <a class="button small" href=(format!("/competitions/{competition}/photos"))>"Ver todas las fotos"</a>
+        }
+        if filter.issues {
+            <p class="footnote">"Incluye fotos sin una categoría válida, duplicadas, puntuaciones distintas de Wodbuster, lecturas no comparables, errores, envíos sin confirmar y avisos de revisión de la IA (needs_retake)."</p>
+        }
         <p class="intro">"Las fotos se procesan en segundo plano y las puntuaciones válidas se guardan automáticamente en Wodbuster."</p>
-        <div data-photo-gallery=(format!("/competitions/{competition}/photos/status?page={page}")) data-photo-context=(context)>
-            if photos.is_empty() { <p>"Todavía no hay fotos en esta página."</p> }
+        <div data-photo-gallery=(status_location) data-photo-context=(context) data-photo-filtered=(filtered.to_string())>
+            <p class="notice success" data-photo-list-feedback="" role="status" hidden=""></p>
+            <p data-photo-empty="" hidden=(!photos.is_empty())>"No hay fotos en esta página para la selección actual."</p>
+            <p class="notice loading" data-photo-list-changed="" hidden="">"La lista de fotos ha cambiado. " <a href=(gallery_location(competition, &filter, page))>"Actualizar vista"</a></p>
             for photo in &photos { photo_card(photo: photo, competition: competition, csrf: &csrf) }
         </div>
         <div class="photo-navigation">
-            if page>0 { <a class="button" href=(format!("?page={}",page-1))>"Anteriores"</a> }
-            if photos.len()==20 { <a class="button" href=(format!("?page={}",page+1))>"Siguientes"</a> }
+            if page>0 { <a class="button" href=(gallery_location(competition, &filter, page-1))>"Anteriores"</a> }
+            if photos.len()==20 { <a class="button" href=(gallery_location(competition, &filter, page+1))>"Siguientes"</a> }
         </div>
     })
 }
@@ -178,15 +274,32 @@ async fn photo_card(photo: &Photo, competition: i64, csrf: &str) -> Result<impl 
             <div>
                 <div class="photo-heading">
                     <h2 data-photo-state="" role="status">(photo.label())</h2>
+                    <div class="photo-card-actions">
                     <form action=(format!("/competitions/{competition}/photos/{}/refresh",photo.id)) method="post" data-photo-refresh="">
                         <input type="hidden" name="csrf" value=(csrf)>
                         <input type="hidden" name="revision" value=(photo.revision)>
                         <button class="small secondary photo-refresh" type="submit" disabled=(photo.busy()) title="Volver a analizar la foto y guardar la puntuación en Wodbuster" aria-label="Volver a analizar y guardar esta foto"><span data-photo-refresh-icon="" aria-hidden="true">"↻"</span></button>
                     </form>
+                    <button type="button" class="small danger" data-photo-delete-open="" disabled=(photo.busy())>"Borrar foto"</button>
+                    </div>
                 </div>
+                <dialog data-photo-delete-dialog="" aria-labelledby=(format!("delete-title-{}",photo.id))>
+                    <h2 id=(format!("delete-title-{}",photo.id))>"¿Borrar esta foto?"</h2>
+                    <p>"Se eliminarán la imagen y sus datos extraídos. La puntuación guardada en Wodbuster se conservará."</p>
+                    <form action=(format!("/competitions/{competition}/photos/{}/delete",photo.id)) method="post" data-photo-delete="">
+                        <input type="hidden" name="csrf" value=(csrf)>
+                        <input type="hidden" name="revision" value=(photo.revision)>
+                        <button type="button" class="secondary" data-photo-delete-cancel="" autofocus="">"Cancelar"</button>
+                        <button type="submit" class="danger">"Borrar foto definitivamente"</button>
+                        <p data-photo-delete-error="" role="alert" hidden=""></p>
+                    </form>
+                </dialog>
                 <p class="notice loading photo-progress" data-photo-action-message="" role="status" aria-live="polite" aria-atomic="true" hidden=(!photo.busy())>(photo.progress())</p>
                 <p class="footnote">(photo.created_at.clone()) " · " (photo.bytes/1024) " KB · " (photo.width) " × " (photo.height)</p>
                 <p class="reference" data-photo-model="">"Modelo: " (photo.provider.clone()) " / " (photo.model.clone())</p>
+                <p class=(if photo.sync_status=="synced" {"notice success"} else {"notice warning"}) data-photo-sync="">(photo.sync_label())</p>
+                <p class="reference" data-photo-sync-time="">(photo.sync_checked_at.as_ref().map(|at|format!("Datos de Arena: {at}")).unwrap_or_default())</p>
+                <p class="notice warning" data-photo-duplicate="" role="alert" hidden=(photo.duplicate_count<2)>(photo.duplicate_label())</p>
                 <p data-photo-target="">(target)</p>
                 <div class="notice warning" data-photo-warning="" role="alert" hidden=(!photo.warning())>"Aviso: la puntuación se ha guardado, pero la IA ha indicado que hace falta revisar la foto (needs_retake)."</div>
                 <p class="notice error" data-photo-error="" hidden=(errors.is_empty())>(errors)</p>
@@ -217,6 +330,8 @@ pub(super) struct PhotoStatus {
     target: String,
     busy: bool,
     progress: &'static str,
+    sync_label: &'static str,
+    duplicate_label: &'static str,
 }
 
 #[route(GET "/competitions/{competition_id}/photos/status")]
@@ -228,12 +343,19 @@ pub(super) async fn status(
     let competition = competition_id(cx)?;
     let (_, session) = account(cx, competition).await?;
     let state: &AppState = app_context(cx);
+    let filter = query.filter();
+    let detail = state
+        .store
+        .competition_detail(&session.username, competition)
+        .await?;
+    filter_label(&filter, detail.as_ref())?;
     let photos = state
         .store
-        .photos(
+        .filtered_photos(
             &session.username,
             competition,
             i64::from(query.page.unwrap_or(0)) * 20,
+            &filter,
         )
         .await?;
     Ok(Json(
@@ -245,6 +367,8 @@ pub(super) async fn status(
                 target: target(photo.prepared.as_ref()),
                 busy: photo.busy(),
                 progress: photo.progress(),
+                sync_label: photo.sync_label(),
+                duplicate_label: photo.duplicate_label(),
                 photo,
             })
             .collect(),

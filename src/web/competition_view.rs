@@ -1,4 +1,5 @@
 use super::*;
+use crate::photos::PhotoFilter;
 use topcoat::router::{
     error::{bad_request, not_found},
     path_param_segment,
@@ -40,6 +41,11 @@ pub(super) async fn detail_page(cx: &Cx, Form(query): Form<PageQuery>) -> Result
         .is_some_and(|j| j.is_running() || j.state == "succeeded");
     let csrf = csrf_token(cx, state);
     let has_snapshot = snapshot.is_some();
+    let checks = state
+        .store
+        .photo_check_summary(&session.username, id)
+        .await?;
+    let checked_at = snapshot.as_ref().and_then(|s| s.loaded_at.clone());
     let error = match query.error.as_deref() {
         Some("session") => Some("La sesión de Arena ha caducado. Vuelve a iniciar sesión."),
         Some("verification") => {
@@ -80,10 +86,25 @@ pub(super) async fn detail_page(cx: &Cx, Form(query): Form<PageQuery>) -> Result
                 </dialog>
                 <p data-photo-message="" role="status" aria-live="polite" class="footnote"></p>
             </form>
-            <a class="button" href=(format!("/competitions/{id}/photos"))>"Ver fotos"</a>
+            <div class="photo-tools">
+                <a class="button" href=(format!("/competitions/{id}/photos"))>"Ver fotos"</a>
+                <a class="button" href=(photos::gallery_location(id, &PhotoFilter { issues: true, ..Default::default() }, 0))>"Fotos sin categorizar o con problemas"</a>
+                <form method="post" action=(format!("/competitions/{id}/check-sync"))>
+                    <input type="hidden" name="csrf" value=(csrf.clone())>
+                    <button type="submit" class="secondary" data-load-trigger="" disabled=(loading)>"Comprobar sincronización"</button>
+                </form>
+            </div>
         </div>
         if !has_snapshot { <p class="footnote">"Carga los detalles de la competición para enviar fotos."</p> }
         load_view::notice(job: job)
+        if checks.total>0 {
+            <div class="notice loading photo-check-summary">
+                <strong>"Sincronización con Wodbuster"</strong>
+                <p>(checks.synced) " sincronizadas · " (checks.different) " distintas · " (checks.duplicates) " fotos duplicadas · " (checks.unavailable) " sin comprobar o no comparables"</p>
+                if let Some(at)=checked_at { <p>"Últimos datos de Arena: " (at)</p> }
+                <p>"Comprobar sincronización consulta Arena en segundo plano. Solo se compara la última foto añadida de cada categoría, WOD y equipo."</p>
+            </div>
+        }
         if let Some(error)=error { <div class="notice error" role="alert">(error)</div> }
         if let Some(snapshot)=snapshot {
             <p class="intro">(snapshot.categories.len()) " categorías · "
@@ -97,13 +118,17 @@ pub(super) async fn detail_page(cx: &Cx, Form(query): Form<PageQuery>) -> Result
             if snapshot.categories.is_empty() { <p>"No hay categorías disponibles."</p> }
             for category in snapshot.categories {
                 <details class="category">
-                    <summary><strong>(category.name)</strong> <span>(category.teams.len()) " equipos"</span></summary>
+                    <summary><strong>(category.name)</strong> <span>(category.teams.len()) " equipos"</span>
+                        <a class="button small photo-scope" href=(photos::gallery_location(id, &PhotoFilter { category_id: Some(category.id), ..Default::default() }, 0))>"Ver fotos por categoría"</a>
+                    </summary>
                     <p class="reference">"Categoría " (category.id)</p>
                     <h2>"WODs"</h2>
                     if category.wods.is_empty() { <p>"No hay WODs disponibles."</p> }
                     for wod in &category.wods {
                         <details class="wod">
-                            <summary>(wod.name.clone())</summary>
+                            <summary>(wod.name.clone())
+                                <a class="button small photo-scope" href=(photos::gallery_location(id, &PhotoFilter { category_id: Some(category.id), wod_id: Some(wod.id), ..Default::default() }, 0))>"Ver fotos por WOD"</a>
+                            </summary>
                             <p class="reference">"WOD " (wod.id)</p>
                             if !wod.description.is_empty() { <p class="description">(wod.description.clone())</p> }
                             if !wod.scoring.is_empty() { <p class="footnote">(wod.scoring.clone())</p> }
@@ -114,7 +139,9 @@ pub(super) async fn detail_page(cx: &Cx, Form(query): Form<PageQuery>) -> Result
                     if category.teams.is_empty() { <p>"No hay equipos disponibles."</p> }
                     for team in category.teams {
                         <details class="team">
-                            <summary><strong>(team.name)</strong> <span>(team.points)</span></summary>
+                            <summary><strong>(team.name)</strong> <span>(team.points)</span>
+                                <a class="button small photo-scope" href=(photos::gallery_location(id, &PhotoFilter { category_id: Some(category.id), team_reference: Some(team.reference.clone()), ..Default::default() }, 0))>"Ver fotos por equipo"</a>
+                            </summary>
                             <p class="reference">"Referencia " (team.reference) if !team.bib.is_empty() { " · " (team.bib) }</p>
                             if !team.affiliate.is_empty() { <p class="footnote">(team.affiliate)</p> }
                             if let Some(members)=team.members.as_array() {
@@ -156,6 +183,12 @@ pub(super) async fn load_detail(cx: &Cx, Form(form): Form<LoadForm>) -> Result<S
 
 #[route(POST "/competitions/{competition_id}/refresh")]
 pub(super) async fn refresh_detail(cx: &Cx, Form(form): Form<LoadForm>) -> Result<SeeOther> {
+    sync_detail(cx, form, true).await
+}
+
+#[route(POST "/competitions/{competition_id}/check-sync")]
+pub(super) async fn check_sync(cx: &Cx, Form(form): Form<LoadForm>) -> Result<SeeOther> {
+    // Consulta Arena con el mismo trabajo asíncrono que refresca el detalle.
     sync_detail(cx, form, true).await
 }
 

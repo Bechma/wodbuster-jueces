@@ -26,6 +26,7 @@ fn editable_fixture() -> wodbuster_jueces::details::CompetitionDetail {
         wodbuster_jueces::scoring::ScoreFormat::from_fields(&fields);
     detail.categories[0].teams[0].scores[0].metadata =
         serde_json::json!({"fields":fields,"save_controls":[{"name":"panel$CtlSave","id":"save"}]});
+    detail.categories[0].teams[0].scores[0].result = Some("2reps".into());
     detail
 }
 
@@ -81,6 +82,10 @@ async fn uploads_are_private_idempotent_and_gallery_shows_extraction_warnings(
         let headers=format!("wb_session={}; wb_csrf={}",jar.get("wb_session").unwrap().value(),jar.get("wb_csrf").unwrap().value());
         let detail=client.get(format!("{base}/competitions/3910")).header("Cookie",&headers).send().await?.text().await?;
         assert!(detail.contains("Tomar foto")&&detail.contains("capture=\"environment\"")&&detail.contains("Ver fotos"));
+        assert!(detail.contains("Fotos sin categorizar o con problemas")&&detail.contains("issues=true&amp;page=0"));
+        assert!(detail.contains("Comprobar sincronización")&&detail.contains("/competitions/3910/check-sync"));
+        for label in ["Ver fotos por categoría", "Ver fotos por WOD", "Ver fotos por equipo"] { assert!(detail.contains(label)); }
+        for query in ["category_id=16907&amp;page=0", "category_id=16907&amp;wod_id=64459&amp;page=0", "category_id=16907&amp;team_reference=298682&amp;page=0"] { assert!(detail.contains(query), "{query}"); }
         let image=include_bytes!("../examples/poc_agent.png").to_vec();
         let photo_id=Uuid::new_v4();
         let upload=|csrf:&str,id:Uuid|Form::new().text("csrf",csrf.to_string()).text("capture_id",id.to_string()).part("photo",Part::bytes(image.clone()).file_name("photo.png").mime_str("image/png").unwrap());
@@ -94,6 +99,7 @@ async fn uploads_are_private_idempotent_and_gallery_shows_extraction_warnings(
         assert_eq!(photos.len(),1);assert_eq!(photos[0].state,"queued");
         assert_eq!(store.photo_image("judge@example.com",3910,photo_id).await?.unwrap().0,image);
         let binary=format!("{base}/competitions/3910/photos/{photo_id}/image");
+        let delete_url=format!("{base}/competitions/3910/photos/{photo_id}/delete");
         assert_eq!(client.get(&binary).send().await?.status(),401);
         let response=client.get(&binary).header("Cookie",&headers).send().await?;
         assert_eq!(response.headers()["content-type"],"image/png");
@@ -103,13 +109,35 @@ async fn uploads_are_private_idempotent_and_gallery_shows_extraction_warnings(
         let html=client.get(format!("{base}/competitions/3910/photos")).header("Cookie",&headers).send().await?.text().await?;
         assert!(html.contains("Campos extraídos")&&html.contains("Guardada y verificada"));
         assert!(html.contains("photo-fields")&&html.contains("Guardar cambios y encolar")&&html.contains("data-photo-refresh"));
+        assert!(html.contains("data-photo-delete-dialog")&&html.contains("Borrar foto definitivamente")&&html.contains("Sincronizada con Wodbuster"));
         assert!(!html.contains("<pre"));
         assert!(html.contains("Team &lt;unsafe&gt;")&&!html.contains("private-cookie"));
         assert!(html.contains("role=\"alert\">Aviso: la puntuación se ha guardado"));
         let status:serde_json::Value=serde_json::from_str(&client.get(format!("{base}/competitions/3910/photos/status")).header("Cookie",&headers).send().await?.text().await?)?;
         assert_eq!(status[0]["warning"],true);assert_eq!(status[0]["reading"],reading);
         assert!(status[0].get("session_id").is_none());
-        browser_editor_checks(&html,&status).await.map_err(|e|topcoat::Error::msg(e.to_string()))?;
+        for query in ["category_id=16907", "category_id=16907&wod_id=64459", "category_id=16907&team_reference=298682", "issues=true"] {
+            let filtered_html=client.get(format!("{base}/competitions/3910/photos?{query}")).header("Cookie",&headers).send().await?.text().await?;
+            assert!(filtered_html.contains("data-photo-filtered=\"true\"")&&filtered_html.contains(&photo_id.to_string()));
+            assert!(filtered_html.contains("Ver todas las fotos"));
+            let response=client.get(format!("{base}/competitions/3910/photos/status?{query}")).header("Cookie",&headers).send().await?;
+            assert_eq!(response.status(),200);
+            let filtered:serde_json::Value=serde_json::from_str(&response.text().await?)?;
+            assert_eq!(filtered.as_array().unwrap().len(),1);assert_eq!(filtered[0]["id"],photo_id.to_string());
+        }
+        // Una foto guardada sin avisos sale de la vista de problemas.
+        sqlx::query("UPDATE score_photos SET reading=jsonb_set(reading,'{needs_retake}','false') WHERE id=$1").bind(photo_id).execute(&pool).await?;
+        let resolved:serde_json::Value=serde_json::from_str(&client.get(format!("{base}/competitions/3910/photos/status?issues=true")).header("Cookie",&headers).send().await?.text().await?)?;
+        assert!(resolved.as_array().unwrap().is_empty());
+        let empty=client.get(format!("{base}/competitions/3910/photos?issues=true")).header("Cookie",&headers).send().await?.text().await?;
+        assert!(!empty.contains(&format!("data-photo-id=\"{photo_id}\"")));
+        sqlx::query("UPDATE score_photos SET reading=$2 WHERE id=$1").bind(photo_id).bind(sqlx::types::Json(&reading)).execute(&pool).await?;
+        for (query,code) in [("wod_id=64459",400),("team_reference=298682",400),("category_id=1",404),("category_id=16907&wod_id=1",404),("category_id=16907&team_reference=unknown",404)] {
+            for suffix in ["photos","photos/status"] {
+                assert_eq!(client.get(format!("{base}/competitions/3910/{suffix}?{query}")).header("Cookie",&headers).send().await?.status(),code);
+            }
+        }
+        browser_editor_checks(&html,&status,&detail).await.map_err(|e|topcoat::Error::msg(e.to_string()))?;
         let edit_url=format!("{base}/competitions/3910/photos/{photo_id}/edit");
         let refresh_url=format!("{base}/competitions/3910/photos/{photo_id}/refresh");
         let edit=vec![("csrf","csrf-photo-test"),("revision","0"),("category_id","16907"),("wod_id","64459"),("team_reference","298682"),("kind","not_completed"),("repetitions","5"),("needs_retake","true"),("retake_reason","Revisión manual")];
@@ -140,6 +168,10 @@ async fn uploads_are_private_idempotent_and_gallery_shows_extraction_warnings(
         assert_eq!(client.post(&refresh_url).header("Cookie",&headers).form(&[("csrf","csrf-photo-test"),("revision","1")]).send().await?.status(),200);
         let retry=store.photo("judge@example.com",3910,photo_id).await?.unwrap();
         assert_eq!(retry.state,"queued");assert_eq!(retry.revision,2);assert!(retry.reading.is_none()&&retry.prepared.is_none()&&retry.error.is_none());
+        assert_eq!(client.get(&delete_url).header("Cookie",&headers).send().await?.status(),405);
+        assert_eq!(client.post(&delete_url).form(&[("csrf","csrf-photo-test"),("revision","2")]).send().await?.status(),401);
+        assert_eq!(client.post(&delete_url).header("Cookie",&headers).form(&[("csrf","forged"),("revision","2")]).send().await?.status(),403);
+        assert_eq!(client.post(&delete_url).header("Cookie",&headers).form(&[("csrf","csrf-photo-test"),("revision","2")]).send().await?.status(),409);
         assert_eq!(store.photos("judge@example.com",3910,0).await?.len(),1);
         assert_eq!(store.photo_image("judge@example.com",3910,photo_id).await?.unwrap().0,image);
         let other=Uuid::new_v4();
@@ -149,8 +181,21 @@ async fn uploads_are_private_idempotent_and_gallery_shows_extraction_warnings(
         assert_eq!(client.get(&binary).header("Cookie",&foreign).send().await?.status(),404);
         assert_eq!(client.post(&edit_url).header("Cookie",&foreign).form(&edit).send().await?.status(),404);
         assert_eq!(client.post(&refresh_url).header("Cookie",&foreign).form(&[("csrf","csrf-photo-test"),("revision","2")]).send().await?.status(),404);
+        assert_eq!(client.post(&delete_url).header("Cookie",&foreign).form(&[("csrf","csrf-photo-test"),("revision","2")]).send().await?.status(),404);
         let invalid=Form::new().text("csrf","csrf-photo-test").text("capture_id",Uuid::new_v4().to_string()).part("photo",Part::bytes(b"not a photo".to_vec()).file_name("photo.jpg"));
         assert_eq!(client.post(format!("{base}/competitions/3910/photos")).header("Cookie",&headers).multipart(invalid).send().await?.status(),400);
+        sqlx::query("UPDATE score_photos SET state='succeeded' WHERE id=$1").bind(photo_id).execute(&pool).await?;
+        let snapshot_before=store.competition_detail("judge@example.com",3910).await?;
+        assert_eq!(client.post(&delete_url).header("Cookie",&headers).form(&[("csrf","csrf-photo-test"),("revision","1")]).send().await?.status(),409);
+        assert_eq!(client.post(&delete_url).header("Cookie",&headers).form(&[("csrf","csrf-photo-test"),("revision","2")]).send().await?.status(),200);
+        assert!(store.photo_image("judge@example.com",3910,photo_id).await?.is_none());
+        assert_eq!(store.competition_detail("judge@example.com",3910).await?,snapshot_before);
+        // El botón consulta Arena mediante el trabajo asíncrono, protegido y deduplicado.
+        let sync_url=format!("{base}/competitions/3910/check-sync");
+        assert_eq!(client.post(&sync_url).header("Cookie",&headers).form(&[("csrf","forged")]).send().await?.status(),403);
+        let (job,_)=store.begin_load("judge@example.com",Some(3910)).await?;
+        let check=client.post(&sync_url).header("Cookie",&headers).form(&[("csrf","csrf-photo-test")]).send().await?;
+        assert_eq!(check.status(),303);assert!(check.headers()["location"].to_str().unwrap().ends_with(&job.id.to_string()));
         Ok::<_,topcoat::Error>(())
     }.await;
     server.abort();
@@ -159,7 +204,11 @@ async fn uploads_are_private_idempotent_and_gallery_shows_extraction_warnings(
 
 /// Ejecuta el JavaScript real sobre el HTML real de la galería, con transporte simulado.
 /// No llama a la IA ni guarda puntuaciones en Arena.
-async fn browser_editor_checks(html: &str, photos: &serde_json::Value) -> anyhow::Result<()> {
+async fn browser_editor_checks(
+    html: &str,
+    photos: &serde_json::Value,
+    detail_html: &str,
+) -> anyhow::Result<()> {
     use chromiumoxide::{
         Browser,
         cdp::browser_protocol::target::{CreateBrowserContextParams, CreateTargetParams},
@@ -199,6 +248,7 @@ async fn browser_editor_checks(html: &str, photos: &serde_json::Value) -> anyhow
                     testCalls.push({url,values});
                     if (window.testHold) await new Promise(resolve=>{window.releaseRefresh=resolve;});
                     if (window.testReject) return {ok:false,status:409,json:async()=>({message:'Conflicto: recarga la página.'})};
+                    if(url.endsWith('/delete')) {testPhotos=[];return {ok:true,json:async()=>({deleted:true,message:'Foto borrada. La puntuación de Wodbuster se conserva.'})};}
                     const photo=testPhotos[0];photo.revision++;
                     if(url.endsWith('/edit')) {photo.reading.score_value={kind:values.kind,repetitions:Number(values.repetitions),tie_break:null};photo.state='parsed';}
                     else {photo.reading=null;photo.state='queued';}
@@ -216,6 +266,12 @@ async fn browser_editor_checks(html: &str, photos: &serde_json::Value) -> anyhow
         assert_eq!(initial["kind"],"not_completed");assert_eq!(initial["reps"],"2");assert_eq!(initial["hidden"],true);
         let readonly:serde_json::Value=page.evaluate("({value:document.querySelector('[data-field-value=repetitions]').textContent,closed:document.querySelector('[data-field-control=repetitions]').hidden,saveDisabled:document.querySelector('[data-photo-save]').disabled,buttons:document.querySelectorAll('[data-field-edit]').length})").await?.into_value()?;
         assert_eq!(readonly["value"],"2");assert_eq!(readonly["closed"],true);assert_eq!(readonly["saveDisabled"],true);assert_eq!(readonly["buttons"],10);
+        // Abrir y cancelar el modal no envía ninguna petición de borrado.
+        page.evaluate("document.querySelector('[data-photo-delete-open]').click()").await?;
+        assert!(page.evaluate("document.querySelector('[data-photo-delete-dialog]').open && testCalls.length===0").await?.into_value::<bool>()?);
+        save_test_screenshot(&page,"photo-delete-modal.png").await?;
+        page.evaluate("document.querySelector('[data-photo-delete-cancel]').click()").await?;
+        assert!(page.evaluate("!document.querySelector('[data-photo-delete-dialog]').open && testCalls.length===0").await?.into_value::<bool>()?);
         page.evaluate("document.querySelector('[data-field-edit=repetitions]').click()").await?;
         assert!(!page.evaluate("document.querySelector('[data-field-control=repetitions]').hidden").await?.into_value::<bool>()?);
         assert!(page.evaluate("document.querySelector('[data-photo-save]').disabled").await?.into_value::<bool>()?);
@@ -279,9 +335,43 @@ async fn browser_editor_checks(html: &str, photos: &serde_json::Value) -> anyhow
         page.evaluate("testPoll()").await?;
         let completed:serde_json::Value=page.evaluate("({time:document.querySelector('[name=time]').value,timeRequired:document.querySelector('[name=time]').required,repsDisabled:document.querySelector('[name=repetitions]').disabled})").await?.into_value()?;
         assert_eq!(completed["time"],"05:32");assert_eq!(completed["timeRequired"],true);assert_eq!(completed["repsDisabled"],true);
+        // Una reasignación desaparece del filtro sin perder una edición pendiente.
+        page.evaluate("document.querySelector('[data-photo-gallery]').dataset.photoFiltered='true';document.querySelector('[name=time]').value='06:00';document.querySelector('[name=time]').dispatchEvent(new Event('input',{bubbles:true}));testPhotos=[];").await?;
+        page.evaluate("testPoll()").await?;
+        assert!(page.evaluate("!!document.querySelector('[data-photo-id]') && !document.querySelector('[data-photo-list-changed]').hidden").await?.into_value::<bool>()?);
+        page.evaluate("document.querySelector('[name=time]').value='05:32';document.querySelector('[name=time]').dispatchEvent(new Event('input',{bubbles:true}));").await?;
+        page.evaluate("testPoll()").await?;
+        assert!(page.evaluate("!document.querySelector('[data-photo-id]') && !document.querySelector('[data-photo-empty]').hidden").await?.into_value::<bool>()?);
+        // Render nuevo: solo confirmar dentro del modal elimina la foto.
+        page.set_content(html).await?;
+        page.evaluate(format!("window.testPhotos={photos};window.testCalls=[];window.testReject=false;")).await?;
+        page.evaluate("document.querySelectorAll('form[action]').forEach(form=>{form.action='http://127.0.0.1'+form.getAttribute('action');})").await?;
+        page.evaluate(include_str!("../src/web/photos.js")).await?;
+        page.evaluate("document.querySelector('[data-photo-delete]').requestSubmit()").await?;
+        assert_eq!(page.evaluate("testCalls.length").await?.into_value::<u32>()?,0);
+        page.evaluate("document.querySelector('[data-photo-delete-open]').click();document.querySelector('[data-photo-delete]').requestSubmit()").await?;
+        for _ in 0..30 {if page.evaluate("!document.querySelector('[data-photo-id]')").await?.into_value::<bool>()? {break;}tokio::time::sleep(std::time::Duration::from_millis(20)).await;}
+        assert!(page.evaluate("testCalls.length===1 && testCalls[0].url.endsWith('/delete') && !document.querySelector('[data-photo-id]') && !document.querySelector('[data-photo-list-feedback]').hidden").await?.into_value::<bool>()?);
+        page.set_content(detail_html).await?;
+        assert!(page.evaluate("!!document.querySelector('.photo-tools button') && document.querySelector('.photo-tools button').textContent==='Comprobar sincronización'").await?.into_value::<bool>()?);
+        save_test_screenshot(&page,"competition-photo-actions.png").await?;
         Ok::<_,anyhow::Error>(())
     }.await;
     let _ = browser.dispose_browser_context(context).await;
     driver.abort();
     result
+}
+
+async fn save_test_screenshot(page: &chromiumoxide::Page, name: &str) -> anyhow::Result<()> {
+    if let Some(directory) = std::env::var_os("WODBUSTER_TEST_SCREENSHOTS") {
+        std::fs::create_dir_all(&directory)?;
+        page.save_screenshot(
+            chromiumoxide::page::ScreenshotParams::builder()
+                .full_page(true)
+                .build(),
+            std::path::PathBuf::from(directory).join(name),
+        )
+        .await?;
+    }
+    Ok(())
 }

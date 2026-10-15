@@ -1,11 +1,21 @@
 use super::*;
 use crate::{
-    photos::{NewPhoto, Photo},
+    photos::{NewPhoto, Photo, PhotoFilter},
     scorecard::ExtractionResult,
 };
 use sqlx::{Connection, PgConnection};
 
 const FIELDS: &str = "id,username,competition_id,session_id,media_type,width,height,octet_length(image)::int AS bytes,provider,model,state,revision,reading,prepared,validation_errors,error,to_char(created_at AT TIME ZONE 'Europe/Madrid','DD/MM/YYYY HH24:MI:SS') AS created_at";
+const CHECK_FIELDS: &str = "duplicate_count,is_latest,sync_status,sync_checked_at,arena_value";
+
+#[derive(sqlx::FromRow)]
+pub struct PhotoCheckSummary {
+    pub total: i64,
+    pub synced: i64,
+    pub different: i64,
+    pub duplicates: i64,
+    pub unavailable: i64,
+}
 
 impl SessionStore {
     pub async fn save_photo(&self, new: NewPhoto<'_>) -> sqlx::Result<Uuid> {
@@ -30,8 +40,44 @@ impl SessionStore {
         competition: i64,
         offset: i64,
     ) -> sqlx::Result<Vec<Photo>> {
-        sqlx::query_as(&format!("SELECT {FIELDS} FROM score_photos WHERE username=lower($1) AND competition_id=$2 ORDER BY created_at DESC,id DESC LIMIT 20 OFFSET $3"))
-            .bind(username).bind(competition).bind(offset).fetch_all(&self.pool).await
+        self.filtered_photos(username, competition, offset, &PhotoFilter::default())
+            .await
+    }
+
+    pub async fn filtered_photos(
+        &self,
+        username: &str,
+        competition: i64,
+        offset: i64,
+        filter: &PhotoFilter,
+    ) -> sqlx::Result<Vec<Photo>> {
+        sqlx::query_as(&format!("SELECT {FIELDS},{CHECK_FIELDS} FROM score_photo_checks AS score_photos WHERE username=lower($1) AND competition_id=$2 AND ($4::text IS NULL OR reading->>'category_id'=$4) AND ($5::text IS NULL OR reading->>'wod_id'=$5) AND ($6::text IS NULL OR reading->>'team_reference'=$6)
+            AND (NOT $7::boolean
+                OR NOT EXISTS (SELECT 1 FROM competition_categories c WHERE c.username=score_photos.username AND c.competition_id=score_photos.competition_id AND c.id::text=score_photos.reading->>'category_id')
+                OR state IN ('incomplete','failed','unconfirmed','saved_local_failed')
+                OR COALESCE(error,'')<>'' OR validation_errors<>'[]'::jsonb
+                OR reading->>'needs_retake'='true' OR duplicate_count>1
+                OR sync_status IN ('different','unavailable'))
+            ORDER BY score_photos.created_at DESC,id DESC LIMIT 20 OFFSET $3"))
+            .bind(username).bind(competition).bind(offset)
+            .bind(filter.category_id.map(|id|id.to_string()))
+            .bind(filter.wod_id.map(|id|id.to_string()))
+            .bind(&filter.team_reference).bind(filter.issues).fetch_all(&self.pool).await
+    }
+
+    pub async fn photo_check_summary(
+        &self,
+        username: &str,
+        competition: i64,
+    ) -> sqlx::Result<PhotoCheckSummary> {
+        sqlx::query_as("SELECT count(*) AS total,count(*) FILTER (WHERE sync_status='synced') AS synced,count(*) FILTER (WHERE sync_status='different') AS different,count(*) FILTER (WHERE duplicate_count>1) AS duplicates,count(*) FILTER (WHERE sync_status IN ('unchecked','unavailable')) AS unavailable FROM score_photo_checks WHERE username=lower($1) AND competition_id=$2")
+            .bind(username).bind(competition).fetch_one(&self.pool).await
+    }
+
+    pub async fn delete_photo(&self, photo: &Photo) -> sqlx::Result<bool> {
+        Ok(sqlx::query("DELETE FROM score_photos WHERE id=$1 AND username=$2 AND competition_id=$3 AND revision=$4 AND state NOT IN ('queued','parsing','parsed','submitting')")
+            .bind(photo.id).bind(&photo.username).bind(photo.competition_id).bind(photo.revision)
+            .execute(&self.pool).await?.rows_affected()==1)
     }
 
     pub async fn photo_image(

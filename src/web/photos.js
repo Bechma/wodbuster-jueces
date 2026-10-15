@@ -128,6 +128,9 @@
     for (const card of gallery.querySelectorAll('[data-photo-id]')) {
         const edit = card.querySelector('[data-photo-edit]');
         const retry = card.querySelector('[data-photo-refresh]');
+        const deleteForm = card.querySelector('[data-photo-delete]');
+        const deleteDialog = card.querySelector('[data-photo-delete-dialog]');
+        const deleteOpen = card.querySelector('[data-photo-delete-open]');
         const field = name => edit.elements.namedItem(name);
         const item = {card, edit, retry, field, dirty: false, pending: false, signature: null, busy: edit.querySelector('fieldset').disabled, baseline: {}, open: new Set(), state: card.dataset.photoStatus};
         item.tracking = item.busy;
@@ -142,6 +145,8 @@
         item.lock = () => {
             edit.querySelector('fieldset').disabled = item.busy || item.pending;
             retry.querySelector('button').disabled = item.busy || item.pending;
+            deleteOpen.disabled = item.busy || item.pending;
+            deleteForm.querySelector('[type=submit]').disabled = item.busy || item.pending;
             save.disabled = item.busy || item.pending || !item.dirty;
             retry.querySelector('button').setAttribute('aria-busy', String(item.busy || item.pending));
             retry.querySelector('[data-photo-refresh-icon]').classList.toggle('is-processing', item.busy || item.pending);
@@ -178,6 +183,30 @@
             item.display();
         }, true);
         cards.set(card.dataset.photoId, item);
+        deleteOpen.addEventListener('click', () => {
+            if (item.busy || item.pending) return;
+            deleteForm.querySelector('[data-photo-delete-error]').hidden = true;
+            deleteDialog.showModal();
+        });
+        card.querySelector('[data-photo-delete-cancel]').addEventListener('click', () => deleteDialog.close());
+        deleteForm.addEventListener('submit', async event => {
+            event.preventDefault();
+            if (!deleteDialog.open || item.busy || item.pending) return;
+            const body = new URLSearchParams(new FormData(deleteForm));
+            item.pending = true; item.lock(); actionGeneration++;
+            try {
+                const response = await fetch(deleteForm.action, {method:'POST', body, credentials:'same-origin'});
+                const result = await response.json().catch(() => null);
+                if (!response.ok || !result?.deleted) throw new Error(result?.message || 'No se pudo borrar la foto. Actualiza la vista e inténtalo otra vez.');
+                deleteDialog.close(); card.remove(); cards.delete(card.dataset.photoId);
+                const feedback = gallery.querySelector('[data-photo-list-feedback]');
+                feedback.textContent = result.message; feedback.hidden = false;
+                gallery.querySelector('[data-photo-empty]').hidden = cards.size > 0;
+            } catch (error) {
+                const message = deleteForm.querySelector('[data-photo-delete-error]');
+                message.textContent = error.message; message.hidden = false;
+            } finally { item.pending = false; item.lock(); actionGeneration++; await refresh(); }
+        });
         const selectedCategory = () => categories.find(c => String(c.id) === field('category_id').value);
         const selectedWod = () => selectedCategory()?.wods.find(w => String(w.id) === field('wod_id').value);
         function scoreFields() {
@@ -266,6 +295,18 @@
                 'No se pudo consultar el estado. Volveremos a intentarlo automáticamente.');
             const photos = await response.json();
             if (generation !== actionGeneration) return;
+            if (gallery.dataset.photoFiltered === 'true') {
+                const assigned = new Set(photos.map(photo => photo.id));
+                let changed = photos.some(photo => !cards.has(photo.id));
+                for (const [id, item] of cards) {
+                    if (assigned.has(id)) continue;
+                    changed = true;
+                    // Conserva una edición que aún no se ha enviado.
+                    if (!item.pending && !item.dirty) { item.card.remove(); cards.delete(id); }
+                }
+                if (changed) gallery.querySelector('[data-photo-list-changed]').hidden = false;
+                gallery.querySelector('[data-photo-empty]').hidden = cards.size > 0 || photos.length > 0;
+            }
             for (const photo of photos) {
                 const item = cards.get(photo.id);
                 if (!item || item.pending) continue;
@@ -279,11 +320,18 @@
                 card.querySelector('[data-photo-state]').textContent = photo.label;
                 card.querySelector('[data-photo-target]').textContent = photo.target;
                 card.querySelector('[data-photo-model]').textContent = `Modelo: ${photo.provider} / ${photo.model}`;
+                const sync = card.querySelector('[data-photo-sync]');
+                sync.textContent = photo.sync_label;
+                sync.className = `notice ${photo.sync_status === 'synced' ? 'success' : 'warning'}`;
+                card.querySelector('[data-photo-sync-time]').textContent = photo.sync_checked_at ? `Datos de Arena: ${photo.sync_checked_at}` : '';
+                const duplicate = card.querySelector('[data-photo-duplicate]');
+                duplicate.textContent = photo.duplicate_label;
+                duplicate.hidden = photo.duplicate_count < 2;
                 const signature = JSON.stringify(photo.reading);
                 if (!item.dirty) {
                     if (signature !== item.signature) item.populate(photo.reading);
                     item.signature = signature;
-                    for (const form of [edit, retry]) form.elements.namedItem('revision').value = photo.revision;
+                    for (const form of [edit, retry, card.querySelector('[data-photo-delete]')]) form.elements.namedItem('revision').value = photo.revision;
                 }
                 item.busy = photo.busy; item.lock();
                 card.querySelector('[data-photo-warning]').hidden = !photo.warning;

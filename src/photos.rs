@@ -13,6 +13,15 @@ use uuid::Uuid;
 
 pub const MAX_IMAGE_BYTES: usize = 1_572_864;
 
+/// Asignación actual de una foto, según su lectura extraída o corregida.
+#[derive(Default)]
+pub struct PhotoFilter {
+    pub category_id: Option<i64>,
+    pub wod_id: Option<i64>,
+    pub team_reference: Option<String>,
+    pub issues: bool,
+}
+
 #[derive(Debug, Serialize, Deserialize, sqlx::FromRow)]
 pub struct Photo {
     pub id: Uuid,
@@ -34,9 +43,36 @@ pub struct Photo {
     pub validation_errors: Value,
     pub error: Option<String>,
     pub created_at: String,
+    #[sqlx(default)]
+    pub duplicate_count: i64,
+    #[sqlx(default)]
+    pub is_latest: bool,
+    #[sqlx(default)]
+    pub sync_status: String,
+    #[sqlx(default)]
+    pub sync_checked_at: Option<String>,
+    #[sqlx(default)]
+    pub arena_value: Option<Value>,
 }
 
 impl Photo {
+    pub fn sync_label(&self) -> &'static str {
+        match self.sync_status.as_str() {
+            "synced" => "Sincronizada con Wodbuster",
+            "different" => "La puntuación no coincide con Wodbuster",
+            "superseded" => "Se compara la última foto añadida para este equipo y WOD",
+            "unavailable" => "No se puede comparar: faltan datos o el formato no es compatible",
+            _ => "Sin comprobar: consulta los datos de Wodbuster",
+        }
+    }
+
+    pub fn duplicate_label(&self) -> &'static str {
+        if self.is_latest {
+            "Hay varias fotos para esta categoría, WOD y equipo. Esta es la última añadida y se utiliza para comprobar la sincronización."
+        } else {
+            "Hay varias fotos para esta categoría, WOD y equipo. Se utiliza la última añadida para comprobar la sincronización."
+        }
+    }
     pub fn progress(&self) -> &'static str {
         match self.state.as_str() {
             "queued" => "Foto en cola. El análisis comenzará cuando el worker esté disponible.",

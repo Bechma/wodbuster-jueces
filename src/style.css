@@ -31,7 +31,7 @@ button:disabled { opacity:0.6; cursor:wait; }
 .competition-actions { display:flex; flex-wrap:wrap; align-items:center; gap:8px; }
 .competition-actions button.small { margin:0; width:auto; padding:8px 12px; font-size:13px; }
 button.danger { background:#fff2f1; color:#9c322c; }
-button.danger:hover { background:#f9dfdc; }
+button.danger:enabled:hover { background:#f9dfdc; }
 .button { display:inline-block; padding:12px 16px; border-radius:8px; background:#087b77; color:white; text-decoration:none; text-align:center; font-size:13px; font-weight:700; }
 .button.small { padding:8px 12px; white-space:nowrap; }
 button.secondary { background:#e9f2f1; color:#087b77; }
@@ -42,6 +42,8 @@ h2 { font-size:18px; margin:24px 0 12px; }
 .category { border:1px solid #dde6e9; border-radius:10px; padding:18px; margin-top:20px; }
 summary { cursor:pointer; line-height:1.6; }
 summary span { color:#5b6c77; font-size:13px; margin-left:12px; }
+.photo-scope { margin:4px 0 4px 12px; vertical-align:middle; }
+.photo-filter-label { font-weight:650; color:#087b77; overflow-wrap:anywhere; }
 .wod,.team { border-bottom:1px solid #dde6e9; padding:12px 0; }
 .reference { font-size:12px; color:#75838c; overflow-wrap:anywhere; }
 .description { font-size:14px; line-height:1.7; white-space:pre-line; }
@@ -54,6 +56,13 @@ dialog::backdrop { background:#162a36a0; }
 dialog video { display:block; width:100%; max-height:65vh; background:#162a36; border-radius:8px; }
 dialog button { margin-top:12px !important; }
 .photo-actions .button { padding:14px 16px; }
+.photo-tools { flex:1; min-width:min(100%,300px); display:grid; grid-template-columns:auto minmax(0,1fr); gap:8px 12px; }
+.photo-tools form { grid-column:1 / -1; min-width:0; }
+.photo-check-summary p { margin:8px 0 0; }
+.photo-card-actions { display:flex; align-items:center; gap:8px; flex:none; }
+.photo-card-actions > button { width:auto; margin:0; padding:8px 10px; }
+[data-photo-delete-dialog] { max-width:480px; }
+[data-photo-delete-dialog] h2 { margin:0; }
 .photo-card { display:grid; grid-template-columns:minmax(140px,220px) minmax(0,1fr); gap:22px; padding:24px 0; border-bottom:1px solid #dde6e9; }
 .photo-card img { width:100%; height:220px; object-fit:contain; background:#f1f5f6; border-radius:8px; }
 .photo-card h2 { margin:0; }

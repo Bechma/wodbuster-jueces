@@ -200,6 +200,39 @@ async fn authorized_photo(cx: &Cx, csrf: &str) -> Result<(Uuid, Photo)> {
     Ok((session_id, photo))
 }
 
+#[derive(Serialize)]
+pub(crate) struct DeleteResponse {
+    deleted: bool,
+    message: &'static str,
+}
+
+#[route(POST "/competitions/{competition_id}/photos/{photo_id}/delete")]
+pub(crate) async fn delete_photo(
+    cx: &Cx,
+    Form(form): Form<RefreshForm>,
+) -> Result<impl IntoResponse> {
+    let (_, photo) = authorized_photo(cx, &form.csrf).await?;
+    let state: &AppState = app_context(cx);
+    let deleted = !photo.busy()
+        && photo.revision == form.revision
+        && state.store.delete_photo(&photo).await?;
+    Ok((
+        if deleted {
+            StatusCode::OK
+        } else {
+            StatusCode::CONFLICT
+        },
+        Json(DeleteResponse {
+            deleted,
+            message: if deleted {
+                "Foto borrada. La puntuación de Wodbuster se conserva."
+            } else {
+                "La foto ha cambiado o está en proceso. Espera a que termine y actualiza la vista."
+            },
+        }),
+    ))
+}
+
 #[route(POST "/competitions/{competition_id}/photos/{photo_id}/refresh")]
 pub(crate) async fn refresh_photo(
     cx: &Cx,

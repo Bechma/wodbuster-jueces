@@ -38,7 +38,48 @@ edición. Las escrituras del worker también comprueban la revisión y el estado
 por lo que un trabajo antiguo no puede sobrescribir una corrección o un nuevo análisis.
 La consulta automática de estados conserva los cambios sin guardar del formulario.
 
+Las fotos y sus datos de procesamiento se conservan al borrar una competición local,
+refrescar sus detalles o refrescar la lista, incluso si la competición ya no aparece
+en Arena. La galería sigue limitada a la cuenta propietaria y a las competiciones
+cargadas: al volver a cargar una competición con el mismo identificador, sus fotos
+vuelven a estar disponibles. Borrar la información de una competición no borra fotos.
+**Borrar foto**, en cada tarjeta, abre un modal con **Cancelar** y **Borrar foto
+definitivamente**. Solo confirmar elimina la imagen y sus datos locales; la puntuación
+guardada en Wodbuster se conserva. El borrado requiere CSRF, cuenta y revisión actual,
+y permanece bloqueado mientras la foto se procesa o envía.
+
 ## Procesamiento
+
+En la competición, **Ver fotos por categoría** muestra las fotos asignadas a esa
+categoría. Cada WOD tiene **Ver fotos por WOD**, que mantiene la categoría seleccionada;
+cada equipo tiene **Ver fotos por equipo**, que incluye sus fotos de todos los WODs
+de esa categoría. Las vistas reutilizan la galería con sus estados y controles de edición.
+El filtro se conserva al paginar y al consultar los estados en segundo plano.
+Se usa la lectura actual de cada foto, incluidas las correcciones manuales: una foto
+sin categoría asignada aparece en la galería general y en **Fotos sin categorizar o
+con problemas**. Este nuevo botón también incluye categorías que ya no existen en
+la competición, lecturas incompletas, errores de procesamiento o validación, envíos
+sin confirmar, fallos al actualizar la copia local y avisos `needs_retake`, aunque
+la puntuación se haya guardado. Incluye también duplicados y puntuaciones distintas
+o no comparables con los datos de Arena. Conserva los controles de edición y refresco.
+**Ver todas las fotos**
+permite volver a ella. Si cambia la asignación durante la consulta, se muestra un aviso
+para actualizar la lista y se conservan las ediciones pendientes.
+
+**Comprobar sincronización**, junto a **Elegir foto**, consulta Arena en segundo plano
+con Browserless y la cookie de la cuenta. Reutiliza el trabajo de carga de detalles;
+al terminar se informa para actualizar la página. El resumen cuenta coincidencias,
+diferencias, fotos duplicadas y fotos que no se pueden comparar. Cada tarjeta muestra
+su comprobación y la fecha de los datos de Arena utilizados. La comparación utiliza
+los valores estructurados del formato, incluidos tiempo, repeticiones, kg y desempate;
+una puntuación ausente nunca equivale a cero. La comprobación consulta los resultados
+y no guarda puntuaciones en Wodbuster.
+
+Si varias fotos tienen la misma cuenta, competición, categoría, WOD y equipo, todas
+figuran como problemáticas. Se compara únicamente la última por `created_at` (con
+`id` como desempate estable); editar una foto antigua no la convierte en la última.
+Los duplicados se detectan entre todas las páginas. Borrar o reasignar una foto
+recalcula el grupo y qué foto se utiliza, sin enviar puntuaciones a Arena.
 
 El servidor inicia un worker con `photos::start`. Un advisory lock de Postgres, mantenido
 en una conexión dedicada, permite un solo worker global por base de datos, incluso si
@@ -84,7 +125,7 @@ que usa la aplicación. El usuario debe haber cargado los detalles de la competi
 ```sh
 cargo test --all-targets
 cargo test --lib photos::tests -- --include-ignored
-cargo test --test photos_web -- --ignored
+cargo test --test photos_web --test photo_filters --test photo_sync --test photo_retention -- --ignored
 cargo test --lib regression_tests -- --ignored
 ```
 

@@ -70,7 +70,7 @@ impl SessionStore {
         Ok(())
     }
 
-    /// Borra los datos locales de la competición solo para esta cuenta.
+    /// Borra la información cargada de la competición para esta cuenta; conserva las fotos.
     pub async fn delete_competition(&self, username: &str, id: i64) -> topcoat::Result<bool> {
         let username = username.to_lowercase();
         let mut tx = self.pool.begin().await?;
@@ -85,7 +85,8 @@ impl SessionStore {
             .await?
             .rows_affected()
             > 0;
-        // Las claves foráneas borran también el detalle, categorías, equipos, WODs y puntuaciones.
+        // Las claves foráneas borran el detalle, categorías, equipos, WODs y puntuaciones.
+        // Las fotos no dependen de esta caché y conservan su cuenta y competition_id.
         tx.commit().await?;
         Ok(deleted)
     }

@@ -2,6 +2,7 @@ use cookie::{Cookie, CookieJar, Key};
 use reqwest::{Client, redirect::Policy};
 use sqlx::PgPool;
 use wodbuster_jueces::{AppState, browser::ArenaBrowser, config::Config, storage::SessionStore};
+mod load_support;
 mod support;
 
 #[sqlx::test]
@@ -38,8 +39,8 @@ async fn loads_detail_and_refreshes_list_or_selected_competition(
         .add(Cookie::new("wb_session", id.to_string()));
     let session_header = format!("wb_session={}", jar.get("wb_session").unwrap().value());
     let state = AppState {
-        store,
-        browser,
+        store: store.into(),
+        browser: browser.into(),
         cookie_key: key,
         secure_cookies: false,
     };
@@ -82,7 +83,49 @@ async fn loads_detail_and_refreshes_list_or_selected_competition(
             .send()
             .await?;
         assert_eq!(loaded.status(), 303);
-        assert_eq!(loaded.headers()["location"], "/competitions/1246");
+        let location = loaded.headers()["location"].to_str().unwrap();
+        assert!(location.starts_with("/competitions/1246?job="));
+        let initial_status: serde_json::Value = serde_json::from_str(
+            &client
+                .get(format!(
+                    "{base}/loads/{}",
+                    location.split("?job=").nth(1).unwrap()
+                ))
+                .header("Cookie", &headers)
+                .send()
+                .await?
+                .text()
+                .await?,
+        )?;
+        assert_eq!(initial_status["state"], "running");
+        let running_page = client
+            .get(format!("{base}{location}"))
+            .header("Cookie", &headers)
+            .send()
+            .await?
+            .text()
+            .await?;
+        assert!(running_page.contains("La información se está cargando en el servidor"));
+        let duplicate = client
+            .post(format!("{base}/competitions/1246/load"))
+            .header("Cookie", &headers)
+            .form(&[("csrf", csrf)])
+            .send()
+            .await?;
+        assert_eq!(duplicate.headers()["location"], location);
+        let job = load_support::wait_for_job(&client, &base, &headers, location).await?;
+        assert_eq!(job["state"], "succeeded");
+        let finished_page = client
+            .get(format!("{base}{location}"))
+            .header("Cookie", &headers)
+            .send()
+            .await?
+            .text()
+            .await?;
+        assert!(
+            finished_page.contains("Actualizar página")
+                && finished_page.contains("La carga ha terminado")
+        );
         let cached = reader
             .competition_detail(&saved.username, 1246)
             .await?
@@ -112,7 +155,14 @@ async fn loads_detail_and_refreshes_list_or_selected_competition(
             .send()
             .await?;
         assert_eq!(refreshed.status(), 303);
-        assert_eq!(refreshed.headers()["location"], "/competitions?loaded=true");
+        let job = load_support::wait_for_job(
+            &client,
+            &base,
+            &headers,
+            refreshed.headers()["location"].to_str().unwrap(),
+        )
+        .await?;
+        assert_eq!(job["state"], "succeeded");
         assert_eq!(
             reader
                 .competition_detail(&saved.username, 1246)
@@ -127,7 +177,9 @@ async fn loads_detail_and_refreshes_list_or_selected_competition(
             .await?
             .text()
             .await?;
-        assert!(list.contains("Ver competicion") && list.contains(">Refrescar</button>"));
+        assert!(
+            list.contains("Ver competicion") && list.contains(">Refrescar competiciones</button>")
+        );
         assert_eq!(reader.competitions(&saved.username).await?.len(), 2);
         assert!(
             reader
@@ -161,7 +213,14 @@ async fn loads_detail_and_refreshes_list_or_selected_competition(
             .send()
             .await?;
         assert_eq!(refreshed_detail.status(), 303);
-        assert_eq!(refreshed_detail.headers()["location"], "/competitions/1246");
+        let job = load_support::wait_for_job(
+            &client,
+            &base,
+            &headers,
+            refreshed_detail.headers()["location"].to_str().unwrap(),
+        )
+        .await?;
+        assert_eq!(job["state"], "succeeded");
         let updated = reader
             .competition_detail(&saved.username, 1246)
             .await?

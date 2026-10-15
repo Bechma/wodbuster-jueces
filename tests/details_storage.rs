@@ -6,6 +6,77 @@ use support::fixture;
 
 #[sqlx::test]
 #[ignore = "Requiere Postgres de compose.dev.yml y DATABASE_URL"]
+async fn score_formats_and_values_are_saved_per_category(pool: PgPool) -> topcoat::Result<()> {
+    use serde_json::json;
+    use wodbuster_jueces::scoring::{ScoreKind, ScoreValue};
+    let store = SessionStore::new(pool.clone(), "test-secret-with-at-least-32-bytes");
+    store
+        .save_competitions("judge@example.com", &[Competition::new(3910, "Fixture")])
+        .await?;
+    let field = |name: &str, value: &str| json!({"attributes":{"name":format!("panel${name}"),"id":name},"value":value,"options":[]});
+    let mut detail = fixture();
+    let timed = json!([
+        field("IoComplete", "False"),
+        field("IoTimeMMSS", ""),
+        field("IoReps", "52")
+    ]);
+    detail.categories[0].wods[0].metadata["score_fields"] = timed.clone();
+    detail.categories[0].teams[0].scores[0].metadata["fields"] = timed;
+    let mut pending = detail.categories[0].teams[0].clone();
+    pending.reference = "pending".into();
+    pending.scores[0].result = None;
+    detail.categories[0].teams.push(pending);
+    let mut scaled = detail.categories[0].clone();
+    scaled.id = 16912;
+    scaled.name = "SCL Mixto".into();
+    scaled.wods[0].metadata["score_fields"] = json!([field("IoReps", "52")]);
+    detail.categories.push(scaled);
+    store
+        .save_competition_detail("judge@example.com", &detail)
+        .await?;
+    let restored = store
+        .competition_detail("judge@example.com", 3910)
+        .await?
+        .unwrap();
+    assert_eq!(
+        restored.categories[0].wods[0]
+            .score_format
+            .as_ref()
+            .unwrap()
+            .kind,
+        ScoreKind::TimeOrRepetitions
+    );
+    assert_eq!(
+        restored.categories[1].wods[0]
+            .score_format
+            .as_ref()
+            .unwrap()
+            .kind,
+        ScoreKind::Repetitions
+    );
+    assert_eq!(
+        restored.categories[0].teams[0].scores[0].value,
+        Some(ScoreValue::NotCompleted {
+            repetitions: 52,
+            tie_break: None
+        })
+    );
+    assert!(!restored.categories[0].teams[1].scores[0].is_scored());
+    assert!(restored.categories[0].teams[1].scores[0].value.is_none());
+    let stored_kind: String = sqlx::query_scalar(
+        "SELECT data->'score_format'->>'kind' FROM competition_wods WHERE category_id=16907",
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(stored_kind, "time_or_repetitions");
+    let stored_value: serde_json::Value = sqlx::query_scalar("SELECT data->'value' FROM competition_scores WHERE category_id=16907 AND team_reference='298682'").fetch_one(&pool).await?;
+    assert_eq!(stored_value["kind"], "not_completed");
+    assert_eq!(stored_value["repetitions"], 52);
+    Ok(())
+}
+
+#[sqlx::test]
+#[ignore = "Requiere Postgres de compose.dev.yml y DATABASE_URL"]
 async fn snapshots_and_related_references_are_atomic_and_survive_list_refresh(
     pool: PgPool,
 ) -> topcoat::Result<()> {

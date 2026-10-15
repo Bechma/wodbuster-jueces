@@ -16,6 +16,11 @@ button:hover { background: #076460; }
 button:focus-visible { outline: 3px solid #087b7760; outline-offset: 3px; }
 .footnote { color: #75838c; font-size: 12px; margin: 22px 0 0; }
 .notice { padding: 14px; border-radius: 8px; font-size: 13px; line-height: 1.6; }
+.loading { background:#eef4fa; color:#244b6b; border:1px solid #cfdfed; }
+.load-notice { margin:20px 0; }
+.load-notice p { margin:0; }
+.load-notice button { margin-top:12px; }
+button:disabled { opacity:0.6; cursor:wait; }
 .error { background: #fff2f1; color: #9c322c; border: 1px solid #f1d5d2; }
 .success { background: #e9f5f1; color: #236951; border: 1px solid #cbe6da; margin-top: 22px; }
 .competition-list { list-style: none; padding: 0; margin: 24px 0; }

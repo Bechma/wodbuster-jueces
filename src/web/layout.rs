@@ -63,6 +63,7 @@ pub(super) async fn app_layout(cx: &Cx, slot: Slot<'_>) -> Result<impl View> {
                 <meta name="viewport" content="width=device-width, initial-scale=1">
                 <title>(title)</title>
                 <style>(include_str!("../style.css"))</style>
+                <script src="/assets/load-status.js" defer=""></script>
             </head>
             <body>
                 <main class=(options.wide.then_some("competition-detail"))>

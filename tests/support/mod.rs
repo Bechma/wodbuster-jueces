@@ -12,6 +12,7 @@ pub fn fixture() -> CompetitionDetail {
             name: "RX".into(),
             metadata: json!({"type":"Team (2)"}),
             wods: vec![Wod {
+                score_format: None,
                 id: 64459,
                 name: "Giralda".into(),
                 description: "AMRAP 10 minutos".into(),
@@ -30,6 +31,7 @@ pub fn fixture() -> CompetitionDetail {
                 members: json!([{"Id":"member-reference","Nombre":"Member"}]),
                 metadata: json!({"judge_url":"score-reference"}),
                 scores: vec![Score {
+                    value: None,
                     wod_id: 64459,
                     result: Some("52reps".into()),
                     rank: Some("1".into()),

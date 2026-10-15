@@ -17,8 +17,8 @@ use topcoat::{
 use uuid::Uuid;
 mod competition_view;
 mod layout;
+mod load_view;
 
-use crate::competitions::CompetitionError;
 use crate::{AppState, browser::LoginError};
 
 const SESSION_COOKIE: &str = "wb_session";
@@ -36,6 +36,8 @@ pub fn router(state: AppState) -> Router {
         .route(competition_view::load_detail)
         .route(competition_view::refresh_detail)
         .route(competition_view::delete_competition)
+        .route(load_view::status)
+        .route(load_view::script)
         .cookies()
         .app_context(state)
         .build()
@@ -44,15 +46,20 @@ pub fn router(state: AppState) -> Router {
 #[derive(Deserialize)]
 struct PageQuery {
     error: Option<String>,
+    job: Option<Uuid>,
 }
 
 #[page("/")]
 async fn home(cx: &Cx, Form(query): Form<PageQuery>) -> Result<impl View> {
     no_cache(cx);
     let state: &AppState = app_context(cx);
-    let session = match session_id(cx, state) {
-        Some(id) => state.store.load(id).await?,
-        None => None,
+    let session = if query.error.as_deref() == Some("session") {
+        None
+    } else {
+        match session_id(cx, state) {
+            Some(id) => state.store.load(id).await?,
+            None => None,
+        }
     };
     let csrf = csrf_token(cx, state);
     let error = match query.error.as_deref() {
@@ -114,6 +121,7 @@ struct LoginForm {
 struct CompetitionsQuery {
     error: Option<String>,
     loaded: Option<bool>,
+    job: Option<Uuid>,
 }
 
 #[page("/competitions")]
@@ -127,6 +135,11 @@ async fn my_competitions(cx: &Cx, Form(query): Form<CompetitionsQuery>) -> Resul
         return Err(see_other("/").into());
     };
     let competitions = state.store.competitions(&session.username).await?;
+    let job = load_view::job_for_page(cx, &session.username, query.job, None).await?;
+    let loading = job
+        .as_ref()
+        .is_some_and(|j| j.is_running() || j.state == "succeeded");
+    let loaded = query.loaded == Some(true) || job.as_ref().is_some_and(|j| j.state == "succeeded");
     let csrf = csrf_token(cx, state);
     let error = match query.error.as_deref() {
         Some("verification") => {
@@ -147,12 +160,13 @@ async fn my_competitions(cx: &Cx, Form(query): Form<CompetitionsQuery>) -> Resul
     Ok(view! {
         <p class="eyebrow">"WODBUSTER ARENA"</p>
         <h1 id="title">"Mis competiciones"</h1>
+        load_view::notice(job: job)
         if let Some(error) = error {
             <div class="notice error" role="alert">(error)</div>
         }
         if competitions.is_empty() {
             <p class="intro">
-                if query.loaded == Some(true) {
+                if loaded {
                     "No hay competiciones en las que seas juez o administrador."
                 } else {
                     "Todavía no hay competiciones guardadas."
@@ -160,7 +174,7 @@ async fn my_competitions(cx: &Cx, Form(query): Form<CompetitionsQuery>) -> Resul
             </p>
             <form method="post" action="/competitions/load">
                 <input type="hidden" name="csrf" value=(csrf.clone())>
-                <button type="submit">"Cargar"</button>
+                <button type="submit" data-load-trigger="" disabled=(loading)>"Cargar"</button>
             </form>
         } else {
             <ul class="competition-list">
@@ -177,11 +191,11 @@ async fn my_competitions(cx: &Cx, Form(query): Form<CompetitionsQuery>) -> Resul
                     </li>
                 }
             </ul>
+            <form method="post" action="/competitions/refresh">
+                <input type="hidden" name="csrf" value=(csrf.clone())>
+                <button type="submit" class="secondary" data-load-trigger="" disabled=(loading)>"Refrescar competiciones"</button>
+            </form>
         }
-        <form method="post" action="/competitions/refresh">
-            <input type="hidden" name="csrf" value=(csrf.clone())>
-            <button type="submit" class="secondary">"Refrescar"</button>
-        </form>
     })
 }
 
@@ -226,36 +240,11 @@ async fn sync_competitions(cx: &Cx, form: LoadForm, refresh: bool) -> Result<See
     {
         return Ok(see_other("/competitions"));
     }
-    let competitions = match state.browser.competitions(&session.cookie).await {
-        Ok(competitions) => competitions,
-        Err(CompetitionError::SessionExpired) => {
-            cookies(cx)
-                .signed(&state.cookie_key)
-                .remove(Cookie::build((SESSION_COOKIE, "")).path("/").build());
-            return Ok(see_other("/?error=session"));
-        }
-        Err(error) => {
-            let code = match error {
-                CompetitionError::Verification => "verification",
-                CompetitionError::Timeout => "timeout",
-                CompetitionError::Busy => "busy",
-                CompetitionError::Unavailable => "unavailable",
-                CompetitionError::InvalidPage => "invalid",
-                CompetitionError::AccessDenied => "invalid",
-                CompetitionError::SessionExpired => unreachable!(),
-            };
-            return Ok(see_other(format!("/competitions?error={code}")));
-        }
-    };
-    if state
-        .store
-        .save_competitions(&session.username, &competitions)
-        .await
-        .is_err()
-    {
-        return Ok(see_other("/competitions?error=storage"));
+    let (job, created) = state.store.begin_load(&session.username, None).await?;
+    if created {
+        crate::loads::start(state.clone(), session, &job);
     }
-    Ok(see_other("/competitions?loaded=true"))
+    Ok(see_other(job.location()))
 }
 
 fn csrf_token(cx: &Cx, state: &AppState) -> String {

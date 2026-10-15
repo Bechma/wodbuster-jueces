@@ -10,6 +10,7 @@ use crate::browser::AuthCookie;
 use crate::competitions::Competition;
 use crate::details::CompetitionDetail;
 use sqlx::types::Json;
+mod loads;
 
 pub struct SessionStore {
     pool: PgPool,
@@ -97,6 +98,7 @@ impl SessionStore {
             "SELECT snapshot, to_char(loaded_at AT TIME ZONE 'Europe/Madrid', 'DD/MM/YYYY HH24:MI') FROM competition_details WHERE username=$1 AND competition_id=$2")
             .bind(username.to_lowercase()).bind(id).fetch_optional(&self.pool).await?;
         Ok(row.map(|(Json(mut snapshot), loaded_at)| {
+            crate::scoring::prepare_detail(&mut snapshot);
             snapshot.loaded_at = Some(loaded_at);
             snapshot
         }))
@@ -107,6 +109,9 @@ impl SessionStore {
         username: &str,
         detail: &CompetitionDetail,
     ) -> topcoat::Result<()> {
+        let mut prepared = detail.clone();
+        crate::scoring::prepare_detail(&mut prepared);
+        let detail = &prepared;
         let username = username.to_lowercase();
         let mut tx = self.pool.begin().await?;
         sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")

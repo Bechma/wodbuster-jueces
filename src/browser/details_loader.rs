@@ -1,7 +1,7 @@
 use super::*;
 use crate::{
     competitions::Competition,
-    details::{self, Category, CompetitionDetail, Score, Wod},
+    details::{self, Category, CompetitionDetail, Score, Team, Wod},
 };
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
@@ -142,6 +142,95 @@ impl Connection {
         )
         .await;
     }
+
+    /// Cambia únicamente el selector de modo; nunca pulsa los controles de guardar.
+    async fn discover_score_branches(
+        &self,
+        url: &str,
+        team: &Team,
+        wods: &mut BTreeMap<i64, Wod>,
+    ) -> Result<(), CompetitionError> {
+        let url = Url::parse(url).map_err(|_| CompetitionError::InvalidPage)?;
+        if url.origin() != Url::parse(ARENA_URL).unwrap().origin() {
+            return Err(CompetitionError::InvalidPage);
+        }
+        self.page
+            .goto(url.as_str())
+            .await
+            .map_err(|_| CompetitionError::Unavailable)?;
+        for value in ["True", "False"] {
+            let script = format!(
+                r#"(()=>{{
+                const selects=[...document.querySelectorAll('select')].filter(e=>e.name.endsWith('$IoComplete'));
+                if (!selects.length) return false;
+                document.documentElement.dataset.scoreSchemaPending='true';
+                const manager=window.Sys?.WebForms?.PageRequestManager?.getInstance();
+                if (manager) {{ const done=()=>{{ document.documentElement.removeAttribute('data-score-schema-pending'); manager.remove_endRequest(done); }}; manager.add_endRequest(done); }}
+                selects.forEach(e=>e.value={value:?});
+                selects[0].dispatchEvent(new Event('change',{{bubbles:true}}));
+                return true;
+            }})()"#
+            );
+            let found = self
+                .page
+                .evaluate(script)
+                .await
+                .map_err(|_| CompetitionError::Unavailable)?
+                .into_value::<bool>()
+                .map_err(|_| CompetitionError::InvalidPage)?;
+            if !found {
+                return Err(CompetitionError::InvalidPage);
+            }
+            let mut ready = false;
+            for _ in 0..60 {
+                sleep(Duration::from_millis(200)).await;
+                ready = self
+                    .page
+                    .evaluate("!document.documentElement.dataset.scoreSchemaPending")
+                    .await
+                    .ok()
+                    .and_then(|v| v.into_value::<bool>().ok())
+                    .unwrap_or(false);
+                if ready {
+                    break;
+                }
+            }
+            if !ready {
+                return Err(CompetitionError::Timeout);
+            }
+            let html = self
+                .page
+                .content()
+                .await
+                .map_err(|_| CompetitionError::Unavailable)?;
+            // No reemplaza los valores originales del equipo por los de la exploración.
+            let mut temporary = team.clone();
+            details::enrich_judge_form(&html, &mut temporary, wods);
+            let suffix = if value == "True" {
+                "$IoTimeMMSS"
+            } else {
+                "$IoReps"
+            };
+            let has_control = |wod: &Wod, suffix: &str| {
+                wod.metadata["score_fields"]
+                    .as_array()
+                    .is_some_and(|fields| {
+                        fields.iter().any(|f| {
+                            f["attributes"]["name"]
+                                .as_str()
+                                .is_some_and(|n| n.ends_with(suffix))
+                        })
+                    })
+            };
+            if wods
+                .values()
+                .any(|w| has_control(w, "$IoComplete") && !has_control(w, suffix))
+            {
+                return Err(CompetitionError::InvalidPage);
+            }
+        }
+        Ok(())
+    }
 }
 
 impl ArenaBrowser {
@@ -245,6 +334,7 @@ impl ArenaBrowser {
             }
             snapshot.categories.push(category);
         }
+        crate::scoring::prepare_detail(&mut snapshot);
         Ok(snapshot)
     }
 
@@ -267,7 +357,7 @@ impl ArenaBrowser {
         )?;
         let mut wods = BTreeMap::new();
         for (order, (wod_id, wod_name)) in board.wods.into_iter().enumerate() {
-            wods.insert(wod_id,definitions.get(&wod_id).cloned().unwrap_or(Wod{id:wod_id,name:wod_name,description:String::new(),scoring:String::new(),metadata:json!({"order":order,"leaderboard_url":format!("{source_url}&idw={wod_id}")})}));
+            wods.insert(wod_id,definitions.get(&wod_id).cloned().unwrap_or(Wod{ score_format: None,id:wod_id,name:wod_name,description:String::new(),scoring:String::new(),metadata:json!({"order":order,"leaderboard_url":format!("{source_url}&idw={wod_id}")})}));
         }
         let mut teams = board.teams;
         let team_paths = teams
@@ -351,6 +441,7 @@ impl ArenaBrowser {
                     judged.scores = wods
                         .keys()
                         .map(|id| Score {
+                            value: None,
                             wod_id: *id,
                             result: None,
                             rank: None,
@@ -376,11 +467,20 @@ impl ArenaBrowser {
                     )
                 })
                 .collect::<Vec<_>>();
+            let mut format_source = None;
             for (position, form) in positions.iter().zip(connection.get_many(&paths).await?) {
                 teams[*position].metadata["judge_form_source"] = form.metadata();
                 if form.available() {
                     details::enrich_judge_form(&form.body, &mut teams[*position], &mut wods);
+                    if format_source.is_none() && form.body.contains("IoComplete") {
+                        format_source = Some((*position, form.requested.clone()));
+                    }
                 }
+            }
+            if let Some((position, url)) = format_source {
+                connection
+                    .discover_score_branches(&url, &teams[position], &mut wods)
+                    .await?;
             }
         }
         // Añade definiciones aunque una categoría no tenga inscritos.
@@ -388,7 +488,8 @@ impl ArenaBrowser {
             .values()
             .filter(|wod| wod.metadata["category"].as_str() == Some(&name))
         {
-            wods.insert(definition.id, definition.clone());
+            wods.entry(definition.id)
+                .or_insert_with(|| definition.clone());
         }
         let mut breakdown_targets = Vec::new();
         for (team_index, team) in teams.iter_mut().enumerate() {
@@ -446,5 +547,72 @@ impl ArenaBrowser {
             teams,
             metadata: json!({"leaderboard_url":source_url,"judge_page":judge_status,"breakdown_endpoint":breakdown_source}),
         })
+    }
+}
+
+#[cfg(test)]
+mod scoring_tests {
+    use super::*;
+
+    #[tokio::test]
+    #[ignore = "Comprueba con Browserless que descubrir los modos no guarda puntuaciones en Arena"]
+    async fn discovering_modes_does_not_save_scores() -> topcoat::Result<()> {
+        dotenvy::dotenv().ok();
+        let config = crate::config::Config::from_env()?;
+        let pool = sqlx::PgPool::connect(&config.database_url).await?;
+        let id = sqlx::query_scalar::<_, uuid::Uuid>(
+            "SELECT id FROM wodbuster_sessions ORDER BY saved_at DESC LIMIT 1",
+        )
+        .fetch_one(&pool)
+        .await?;
+        let store = crate::storage::SessionStore::new(pool, &config.session_secret);
+        let saved = store.load(id).await?.unwrap();
+        let snapshot = store
+            .competition_detail(&saved.username, 3910)
+            .await?
+            .unwrap();
+        let category = snapshot
+            .categories
+            .iter()
+            .find(|c| c.name == "INT Mixto")
+            .unwrap();
+        let team = category
+            .teams
+            .iter()
+            .find(|t| t.gid.is_some() && t.registration_id.is_some())
+            .unwrap();
+        let url = team.metadata["judge_form_source"]["requested_url"]
+            .as_str()
+            .unwrap();
+        let api = format!(
+            "/api/CompeticionUI/GetInfoAtleta/{}",
+            team.registration_id.unwrap()
+        );
+        let connection = Connection::new(&config.browser_url, &saved.cookie, url).await?;
+        let before = connection
+            .get_many(std::slice::from_ref(&api))
+            .await?
+            .remove(0);
+        let mut wods = category.wods.iter().cloned().map(|w| (w.id, w)).collect();
+        let result = connection
+            .discover_score_branches(url, team, &mut wods)
+            .await;
+        let after = connection
+            .get_many(std::slice::from_ref(&api))
+            .await?
+            .remove(0);
+        connection.close().await;
+        result?;
+        assert!(before.available() && after.available());
+        let scores = |body: &str| -> Vec<Value> {
+            serde_json::from_str::<Value>(body).unwrap()["Wods"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|w| json!({"id":w["Id"],"score":w["Score"],"points":w["Points"]}))
+                .collect()
+        };
+        assert_eq!(scores(&before.body), scores(&after.body));
+        Ok(())
     }
 }

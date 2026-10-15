@@ -8,6 +8,7 @@ use wodbuster_jueces::{
     competitions::Competition,
     storage::SessionStore,
 };
+mod load_support;
 mod support;
 
 #[sqlx::test]
@@ -35,8 +36,8 @@ async fn form_csrf_and_private_success_page(pool: PgPool) -> topcoat::Result<()>
         .await?;
     let key = Key::derive_from(secret.as_bytes());
     let state = AppState {
-        store,
-        browser: ArenaBrowser::new("ws://127.0.0.1:1".parse().unwrap()),
+        store: store.into(),
+        browser: ArenaBrowser::new("ws://127.0.0.1:1".parse().unwrap()).into(),
         cookie_key: key.clone(),
         secure_cookies: false,
     };
@@ -130,10 +131,33 @@ async fn form_csrf_and_private_success_page(pool: PgPool) -> topcoat::Result<()>
             .send()
             .await?;
         assert_eq!(failed_load.status(), 303);
-        assert_eq!(
-            failed_load.headers()["location"],
-            "/competitions?error=unavailable"
-        );
+        let location = failed_load.headers()["location"].to_str().unwrap();
+        assert!(location.starts_with("/competitions?job="));
+        let failed_job =
+            load_support::wait_for_job(&client, &base, &signed_headers, location).await?;
+        assert_eq!(failed_job["state"], "failed");
+        assert_eq!(failed_job["error_code"], "unavailable");
+        let job_id = location.split("?job=").nth(1).unwrap();
+        let private_status = Client::new()
+            .get(format!("{base}/loads/{job_id}"))
+            .send()
+            .await?;
+        assert_eq!(private_status.status(), 401);
+        let other_job = saved_store.begin_load("other@example.com", None).await?.0;
+        let foreign_status = client
+            .get(format!("{base}/loads/{}", other_job.id))
+            .header("Cookie", &signed_headers)
+            .send()
+            .await?;
+        assert_eq!(foreign_status.status(), 404);
+        let notice = client
+            .get(format!("{base}{location}"))
+            .header("Cookie", &signed_headers)
+            .send()
+            .await?
+            .text()
+            .await?;
+        assert!(notice.contains("No se pudo cargar la información de Arena"));
         assert!(
             saved_store
                 .competitions("fixture@example.com")
@@ -200,10 +224,11 @@ async fn form_csrf_and_private_success_page(pool: PgPool) -> topcoat::Result<()>
             .form(&[("csrf", csrf)])
             .send()
             .await?;
-        assert_eq!(
-            failed_detail.headers()["location"],
-            "/competitions/3910?error=unavailable"
-        );
+        let location = failed_detail.headers()["location"].to_str().unwrap();
+        assert!(location.starts_with("/competitions/3910?job="));
+        let job = load_support::wait_for_job(&client, &base, &signed_headers, location).await?;
+        assert_eq!(job["state"], "failed");
+        assert_eq!(job["error_code"], "unavailable");
         assert!(
             saved_store
                 .competition_detail("fixture@example.com", 3910)
@@ -271,10 +296,12 @@ async fn form_csrf_and_private_success_page(pool: PgPool) -> topcoat::Result<()>
             .form(&[("csrf", csrf)])
             .send()
             .await?;
-        assert_eq!(
-            failed_detail_refresh.headers()["location"],
-            "/competitions/3910?error=unavailable"
-        );
+        let location = failed_detail_refresh.headers()["location"]
+            .to_str()
+            .unwrap();
+        let job = load_support::wait_for_job(&client, &base, &signed_headers, location).await?;
+        assert_eq!(job["state"], "failed");
+        assert_eq!(job["error_code"], "unavailable");
         assert_eq!(
             saved_store
                 .competition_detail("fixture@example.com", 3910)
@@ -294,10 +321,15 @@ async fn form_csrf_and_private_success_page(pool: PgPool) -> topcoat::Result<()>
             .form(&[("csrf", csrf)])
             .send()
             .await?;
-        assert_eq!(
-            refresh.headers()["location"],
-            "/competitions?error=unavailable"
-        );
+        let job = load_support::wait_for_job(
+            &client,
+            &base,
+            &signed_headers,
+            refresh.headers()["location"].to_str().unwrap(),
+        )
+        .await?;
+        assert_eq!(job["state"], "failed");
+        assert_eq!(job["error_code"], "unavailable");
         assert!(
             saved_store
                 .competition_detail("fixture@example.com", 3910)

@@ -1,5 +1,4 @@
 use super::*;
-use crate::details::CompetitionDetail;
 use topcoat::router::{
     error::{bad_request, not_found},
     path_param_segment,
@@ -35,6 +34,10 @@ pub(super) async fn detail_page(cx: &Cx, Form(query): Form<PageQuery>) -> Result
         .store
         .competition_detail(&session.username, id)
         .await?;
+    let job = load_view::job_for_page(cx, &session.username, query.job, Some(id)).await?;
+    let loading = job
+        .as_ref()
+        .is_some_and(|j| j.is_running() || j.state == "succeeded");
     let csrf = csrf_token(cx, state);
     let error = match query.error.as_deref() {
         Some("session") => Some("La sesión de Arena ha caducado. Vuelve a iniciar sesión."),
@@ -61,6 +64,7 @@ pub(super) async fn detail_page(cx: &Cx, Form(query): Form<PageQuery>) -> Result
     Ok(view! {
         <p class="eyebrow">"COMPETICIÓN"</p>
         <h1 id="title">(competition.name)</h1>
+        load_view::notice(job: job)
         if let Some(error)=error { <div class="notice error" role="alert">(error)</div> }
         if let Some(snapshot)=snapshot {
             <p class="intro">(snapshot.categories.len()) " categorías · "
@@ -69,7 +73,7 @@ pub(super) async fn detail_page(cx: &Cx, Form(query): Form<PageQuery>) -> Result
             if let Some(loaded_at)=snapshot.loaded_at { <p class="footnote">"Cargado el " (loaded_at)</p> }
             <form method="post" action=(format!("/competitions/{id}/refresh"))>
                 <input type="hidden" name="csrf" value=(csrf)>
-                <button type="submit" class="secondary">"Refrescar"</button>
+                <button type="submit" class="secondary" data-load-trigger="" disabled=(loading)>"Refrescar"</button>
             </form>
             if snapshot.categories.is_empty() { <p>"No hay categorías disponibles."</p> }
             for category in snapshot.categories {
@@ -84,6 +88,7 @@ pub(super) async fn detail_page(cx: &Cx, Form(query): Form<PageQuery>) -> Result
                             <p class="reference">"WOD " (wod.id)</p>
                             if !wod.description.is_empty() { <p class="description">(wod.description.clone())</p> }
                             if !wod.scoring.is_empty() { <p class="footnote">(wod.scoring.clone())</p> }
+                            if let Some(format) = &wod.score_format { <p class="footnote">(format.summary())</p> }
                         </details>
                     }
                     <h2>"Equipos y puntuaciones"</h2>
@@ -119,7 +124,7 @@ pub(super) async fn detail_page(cx: &Cx, Form(query): Form<PageQuery>) -> Result
             <p class="intro">"Todavía no hay información guardada de esta competición."</p>
             <form method="post" action=(format!("/competitions/{id}/load"))>
                 <input type="hidden" name="csrf" value=(csrf)>
-                <button type="submit">"Cargar"</button>
+                <button type="submit" data-load-trigger="" disabled=(loading)>"Cargar"</button>
             </form>
         }
     })
@@ -196,33 +201,9 @@ async fn sync_detail(cx: &Cx, form: LoadForm, refresh: bool) -> Result<SeeOther>
     {
         return Ok(see_other(location));
     }
-    let snapshot: CompetitionDetail =
-        match state.browser.competition_detail(&session.cookie, id).await {
-            Ok(snapshot) => snapshot,
-            Err(CompetitionError::SessionExpired) => {
-                cookies(cx)
-                    .signed(&state.cookie_key)
-                    .remove(Cookie::build((SESSION_COOKIE, "")).path("/").build());
-                return Ok(see_other("/?error=session"));
-            }
-            Err(error) => {
-                let code = match error {
-                    CompetitionError::Verification => "verification",
-                    CompetitionError::Busy => "busy",
-                    CompetitionError::AccessDenied => "access",
-                    CompetitionError::Timeout => "timeout",
-                    _ => "unavailable",
-                };
-                return Ok(see_other(format!("{location}?error={code}")));
-            }
-        };
-    if state
-        .store
-        .save_competition_detail(&session.username, &snapshot)
-        .await
-        .is_err()
-    {
-        return Ok(see_other(format!("{location}?error=storage")));
+    let (job, created) = state.store.begin_load(&session.username, Some(id)).await?;
+    if created {
+        crate::loads::start(state.clone(), session, &job);
     }
-    Ok(see_other(location))
+    Ok(see_other(job.location()))
 }

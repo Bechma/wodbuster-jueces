@@ -31,6 +31,8 @@ pub struct Wod {
     pub description: String,
     pub scoring: String,
     pub metadata: Value,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub score_format: Option<crate::scoring::ScoreFormat>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -56,6 +58,16 @@ pub struct Score {
     pub rank: Option<String>,
     pub points: Option<String>,
     pub metadata: Value,
+    /// Valor interpretado; si el formato no se reconoce, `result` conserva el original.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value: Option<crate::scoring::ScoreValue>,
+}
+
+impl Score {
+    /// El resultado original null es la fuente de verdad, no los valores del formulario.
+    pub fn is_scored(&self) -> bool {
+        self.result.is_some()
+    }
 }
 
 pub(crate) struct Leaderboard {
@@ -302,6 +314,7 @@ pub(crate) fn apply_team_info(
             .ok_or(CompetitionError::InvalidPage)?;
         let name = item["Wod"].as_str().unwrap_or_default().to_owned();
         wods.entry(id).or_insert(Wod {
+            score_format: None,
             id,
             name,
             description: String::new(),
@@ -309,6 +322,7 @@ pub(crate) fn apply_team_info(
             metadata: json!({}),
         });
         team.scores.push(Score {
+            value: None,
             wod_id: id,
             result: item["Score"].as_str().map(fragment_text),
             rank: item["Rank"].as_str().map(str::to_owned),
@@ -382,7 +396,7 @@ pub(crate) fn admin_wods(html: &str) -> BTreeMap<i64, Wod> {
                     .find(|e| e.value().name() == "h3")
             })
             .map(text);
-        wods.insert(id, Wod {id, name:cells.first().cloned().unwrap_or_default(),
+        wods.insert(id, Wod { score_format: None,id, name:cells.first().cloned().unwrap_or_default(),
             description:description.map(description_text).unwrap_or_default(), scoring:cells.get(2).cloned().unwrap_or_default(),
             metadata:json!({"columns":cells,"category":category,"description_html":description.map(|e|e.inner_html()),"description_reference":format!("wd{id}")}),
         });
@@ -579,6 +593,7 @@ mod tests {
         assert_eq!(team.gid.as_deref(), Some("abc123"));
         assert!(team.registration_id.is_none());
         team.scores = vec![Score {
+            value: None,
             wod_id: 34,
             result: None,
             rank: None,
@@ -588,6 +603,7 @@ mod tests {
         let mut wods = BTreeMap::from([(
             34,
             Wod {
+                score_format: None,
                 id: 34,
                 name: "Hidden".into(),
                 description: String::new(),

@@ -6,21 +6,21 @@ use crate::{
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 
-struct Connection {
+pub(super) struct Connection {
     browser: Browser,
-    page: Page,
+    pub(super) page: Page,
     context: chromiumoxide::cdp::browser_protocol::browser::BrowserContextId,
     _driver: Driver,
 }
 
-struct Resource {
+pub(super) struct Resource {
     requested: String,
     url: String,
     status: u64,
-    body: String,
+    pub(super) body: String,
 }
 impl Resource {
-    fn available(&self) -> bool {
+    pub(super) fn available(&self) -> bool {
         self.status == 200
             && Url::parse(&self.url)
                 .ok()
@@ -35,7 +35,11 @@ impl Resource {
 }
 
 impl Connection {
-    async fn new(endpoint: &Url, cookie: &AuthCookie, url: &str) -> Result<Self, CompetitionError> {
+    pub(super) async fn new(
+        endpoint: &Url,
+        cookie: &AuthCookie,
+        url: &str,
+    ) -> Result<Self, CompetitionError> {
         let (browser, mut handler) = Browser::connect(endpoint.as_str())
             .await
             .map_err(|_| CompetitionError::Unavailable)?;
@@ -88,7 +92,10 @@ impl Connection {
         }
         Err(CompetitionError::Verification)
     }
-    async fn get_many(&self, paths: &[String]) -> Result<Vec<Resource>, CompetitionError> {
+    pub(super) async fn get_many(
+        &self,
+        paths: &[String],
+    ) -> Result<Vec<Resource>, CompetitionError> {
         let base = Url::parse(ARENA_URL).unwrap();
         let mut all = Vec::new();
         for chunk in paths.chunks(6) {
@@ -135,7 +142,7 @@ impl Connection {
         }
         Ok(all)
     }
-    async fn close(self) {
+    pub(super) async fn close(self) {
         let _ = timeout(
             Duration::from_secs(3),
             self.browser.dispose_browser_context(self.context.clone()),

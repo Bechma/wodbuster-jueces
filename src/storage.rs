@@ -11,6 +11,7 @@ use crate::competitions::Competition;
 use crate::details::CompetitionDetail;
 use sqlx::types::Json;
 mod loads;
+mod photos;
 
 pub struct SessionStore {
     pool: PgPool,
@@ -157,6 +158,64 @@ impl SessionStore {
             pool,
             cipher: Aes256Gcm::new(&key),
         }
+    }
+
+    /// Actualiza solo la puntuación confirmada, conservando el resto del snapshot más reciente.
+    pub async fn save_confirmed_score(
+        &self,
+        username: &str,
+        competition_id: i64,
+        category_id: i64,
+        team_reference: &str,
+        score: &crate::details::Score,
+    ) -> topcoat::Result<()> {
+        let username = username.to_lowercase();
+        let mut tx = self.pool.begin().await?;
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+            .bind(&username)
+            .execute(&mut *tx)
+            .await?;
+        let snapshot = sqlx::query_scalar::<_, Json<CompetitionDetail>>(
+            "SELECT snapshot FROM competition_details WHERE username=$1 AND competition_id=$2 FOR UPDATE",
+        ).bind(&username).bind(competition_id).fetch_optional(&mut *tx).await?;
+        let mut detail = snapshot
+            .ok_or_else(|| topcoat::Error::msg("La competición ya no está cargada"))?
+            .0;
+        let previous = detail
+            .categories
+            .iter_mut()
+            .find(|c| c.id == category_id)
+            .and_then(|c| c.teams.iter_mut().find(|t| t.reference == team_reference))
+            .and_then(|t| t.scores.iter_mut().find(|s| s.wod_id == score.wod_id))
+            .ok_or_else(|| {
+                topcoat::Error::msg("La puntuación ya no está en la competición cargada")
+            })?;
+        let mut confirmed = score.clone();
+        let mut metadata = previous.metadata.clone();
+        if let (Some(old), Some(new)) = (metadata.as_object_mut(), score.metadata.as_object()) {
+            old.extend(new.clone());
+            confirmed.metadata = metadata;
+        }
+        *previous = confirmed.clone();
+        let updated = sqlx::query("UPDATE competition_scores SET result=$6, rank=$7, points=$8, data=$9 WHERE username=$1 AND competition_id=$2 AND category_id=$3 AND team_reference=$4 AND wod_id=$5")
+            .bind(&username).bind(competition_id).bind(category_id).bind(team_reference).bind(score.wod_id)
+            .bind(&confirmed.result).bind(&confirmed.rank).bind(&confirmed.points).bind(Json(&confirmed))
+            .execute(&mut *tx).await?;
+        if updated.rows_affected() != 1 {
+            return Err(topcoat::Error::msg(
+                "No se encontró la puntuación local para actualizar",
+            ));
+        }
+        sqlx::query(
+            "UPDATE competition_details SET snapshot=$3 WHERE username=$1 AND competition_id=$2",
+        )
+        .bind(&username)
+        .bind(competition_id)
+        .bind(Json(detail))
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(())
     }
 
     pub async fn save(&self, id: Uuid, username: &str, cookie: &AuthCookie) -> topcoat::Result<()> {

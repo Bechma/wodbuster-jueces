@@ -1,5 +1,6 @@
 //! Formatos y valores de puntuación. No escribe ni envía resultados a Arena.
 use crate::details::{CompetitionDetail, Score};
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -71,9 +72,10 @@ pub struct ScoreFormat {
     pub weight_unit: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]
 pub struct MinutesSeconds {
     pub minutes: u32,
+    #[schemars(range(max = 59))]
     pub seconds: u8,
 }
 
@@ -95,8 +97,8 @@ impl MinutesSeconds {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, JsonSchema)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ScoreValue {
     Completed {
         time: MinutesSeconds,
@@ -107,6 +109,7 @@ pub enum ScoreValue {
         tie_break: Option<MinutesSeconds>,
     },
     Weight {
+        #[schemars(range(min = 0.0))]
         kilograms: f64,
     },
     Repetitions {
@@ -117,7 +120,7 @@ pub enum ScoreValue {
     },
 }
 
-fn role(field: &Value) -> FieldRole {
+pub(crate) fn role(field: &Value) -> FieldRole {
     match field["attributes"]["name"]
         .as_str()
         .unwrap_or_default()

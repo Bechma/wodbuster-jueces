@@ -1,5 +1,7 @@
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 mod details_loader;
+mod score_submit;
+pub use score_submit::ScoreSubmissionError;
 
 use crate::competitions::{COMPETITIONS_URL, Competition, CompetitionError, parse_competitions};
 use chromiumoxide::{

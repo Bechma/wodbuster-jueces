@@ -18,6 +18,7 @@ use uuid::Uuid;
 mod competition_view;
 mod layout;
 mod load_view;
+mod photos;
 
 use crate::{AppState, browser::LoginError};
 
@@ -38,6 +39,13 @@ pub fn router(state: AppState) -> Router {
         .route(competition_view::delete_competition)
         .route(load_view::status)
         .route(load_view::script)
+        .page(photos::gallery)
+        .route(photos::upload)
+        .route(photos::status)
+        .route(photos::image)
+        .route(photos::refresh_photo)
+        .route(photos::edit_photo)
+        .route(photos::script)
         .cookies()
         .app_context(state)
         .build()

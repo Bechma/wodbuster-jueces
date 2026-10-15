@@ -39,6 +39,7 @@ pub(super) async fn detail_page(cx: &Cx, Form(query): Form<PageQuery>) -> Result
         .as_ref()
         .is_some_and(|j| j.is_running() || j.state == "succeeded");
     let csrf = csrf_token(cx, state);
+    let has_snapshot = snapshot.is_some();
     let error = match query.error.as_deref() {
         Some("session") => Some("La sesión de Arena ha caducado. Vuelve a iniciar sesión."),
         Some("verification") => {
@@ -64,6 +65,24 @@ pub(super) async fn detail_page(cx: &Cx, Form(query): Form<PageQuery>) -> Result
     Ok(view! {
         <p class="eyebrow">"COMPETICIÓN"</p>
         <h1 id="title">(competition.name)</h1>
+        <div class="photo-actions">
+            <form method="post" action=(format!("/competitions/{id}/photos")) enctype="multipart/form-data" data-photo-upload="">
+                <input type="hidden" name="csrf" value=(csrf.clone())>
+                <input type="file" name="photo" accept="image/*" capture="environment" aria-label="Foto de la puntuación" hidden="">
+                <button type="button" data-photo-open="" disabled=(!has_snapshot)>"📷 Tomar foto"</button>
+                <button type="button" class="secondary" data-photo-file="" disabled=(!has_snapshot)>"Elegir foto"</button>
+                <dialog data-photo-camera="">
+                    <h2>"Foto de la puntuación"</h2>
+                    <video autoplay="" playsinline="" muted="" aria-label="Vista previa de la cámara"></video>
+                    <p data-camera-message="" role="status"></p>
+                    <button type="button" data-photo-capture="">"Hacer foto y subir"</button>
+                    <button type="button" class="secondary" data-photo-cancel="">"Cancelar"</button>
+                </dialog>
+                <p data-photo-message="" role="status" aria-live="polite" class="footnote"></p>
+            </form>
+            <a class="button" href=(format!("/competitions/{id}/photos"))>"Ver fotos"</a>
+        </div>
+        if !has_snapshot { <p class="footnote">"Carga los detalles de la competición para enviar fotos."</p> }
         load_view::notice(job: job)
         if let Some(error)=error { <div class="notice error" role="alert">(error)</div> }
         if let Some(snapshot)=snapshot {

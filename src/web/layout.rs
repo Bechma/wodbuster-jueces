@@ -1,4 +1,4 @@
-use std::sync::Mutex;
+use std::{borrow::Cow, sync::Mutex};
 
 use topcoat::{
     Result,
@@ -7,21 +7,27 @@ use topcoat::{
     view::{View, ViewExt, component, view},
 };
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub(super) struct Back {
-    target: &'static str,
+    target: Cow<'static, str>,
     label: &'static str,
 }
 
 impl Back {
     pub(super) const HOME: Self = Self {
-        target: "/",
+        target: Cow::Borrowed("/"),
         label: "Volver",
     };
     pub(super) const COMPETITIONS: Self = Self {
-        target: "/competitions",
+        target: Cow::Borrowed("/competitions"),
         label: "Volver a Mis competiciones",
     };
+    pub(super) fn competition(id: i64) -> Self {
+        Self {
+            target: Cow::Owned(format!("/competitions/{id}")),
+            label: "Volver a la competición",
+        }
+    }
 }
 
 #[derive(Clone, Default)]
@@ -64,12 +70,13 @@ pub(super) async fn app_layout(cx: &Cx, slot: Slot<'_>) -> Result<impl View> {
                 <title>(title)</title>
                 <style>(include_str!("../style.css"))</style>
                 <script src="/assets/load-status.js" defer=""></script>
+                <script src="/assets/photos.js" defer=""></script>
             </head>
             <body>
                 <main class=(options.wide.then_some("competition-detail"))>
                     <p class="brand">"WODBUSTER / JUECES"</p>
                     <section class="card" aria-labelledby="title">
-                        if let Some(back) = options.back { back_button(back: back, top: true) }
+                        if let Some(back) = options.back.clone() { back_button(back: back, top: true) }
                         (content)
                         if let Some(back) = options.back { back_button(back: back) }
                     </section>

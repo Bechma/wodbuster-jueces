@@ -1,8 +1,11 @@
+pub mod ai;
 pub mod browser;
 pub mod competitions;
 pub mod config;
 pub mod details;
 pub mod loads;
+pub mod photos;
+pub mod scorecard;
 pub mod scoring;
 pub mod storage;
 pub mod web;

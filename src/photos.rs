@@ -353,7 +353,7 @@ mod tests {
             )
             .await?;
         let result=async {
-            page.set_content(r#"<form action="/upload" data-photo-upload><input name="csrf" value="test-csrf" type="hidden"><input type="file"><button type="button" data-photo-open>Foto</button><button type="button" data-photo-file>Elegir foto</button><p data-photo-message></p><dialog data-photo-camera><video autoplay playsinline muted></video><p data-camera-message></p><button type="button" data-photo-capture>Capturar</button><button type="button" data-photo-cancel>Cancelar</button></dialog></form>"#).await?;
+            page.set_content(r#"<form action="/upload" data-photo-upload><input name="csrf" value="test-csrf" type="hidden"><input type="file" accept="image/*" data-photo-input><input type="file" accept="image/*" capture="environment" data-photo-camera-input><button type="button" data-photo-open>Foto</button><button type="button" data-photo-file>Galería o archivos</button><p data-photo-message></p><dialog data-photo-camera><video autoplay playsinline muted></video><p data-camera-message></p><button type="button" data-photo-capture>Capturar</button><button type="button" data-photo-cancel>Cancelar</button></dialog></form>"#).await?;
             page.evaluate(r#"(()=>{
                 window.uploads=[];
                 window.fetch=async(url,options)=>{const blob=options.body.get('photo');const bitmap=await createImageBitmap(blob);uploads.push({csrf:options.body.get('csrf'),id:options.body.get('capture_id'),bytes:blob.size,type:blob.type,width:bitmap.width,height:bitmap.height});bitmap.close();return {ok:true,json:async()=>({id:'test'})};};

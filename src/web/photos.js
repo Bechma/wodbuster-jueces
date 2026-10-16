@@ -35,8 +35,12 @@
             return await optimize(image, image.naturalWidth, image.naturalHeight);
         } finally { URL.revokeObjectURL(url); }
     }
+    const useNativeCamera = navigator.userAgentData?.mobile
+        || /Android|iPhone|iPad|iPod/i.test(navigator.userAgent)
+        || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
     for (const form of document.querySelectorAll('[data-photo-upload]')) {
-        const input = form.querySelector('input[type=file]');
+        const input = form.querySelector('[data-photo-input]');
+        const cameraInput = form.querySelector('[data-photo-camera-input]');
         const button = form.querySelector('[data-photo-open]');
         const choose = form.querySelector('[data-photo-file]');
         const dialog = form.querySelector('dialog');
@@ -53,7 +57,7 @@
         let uploading = false;
         button.addEventListener('click', async () => {
             if (capture) return upload();
-            if (!navigator.mediaDevices?.getUserMedia || !dialog.showModal) return input.click();
+            if (useNativeCamera || !navigator.mediaDevices?.getUserMedia || !dialog.showModal) return cameraInput.click();
             shutter.disabled = true;
             dialog.querySelector('[data-camera-message]').textContent = 'Abriendo cámara…';
             dialog.showModal();
@@ -66,7 +70,7 @@
                 dialog.querySelector('[data-camera-message]').textContent = 'Encuadra la hoja para que los nombres y la puntuación se lean con claridad.';
             } catch (_) {
                 stopCamera();
-                dialog.querySelector('[data-camera-message]').textContent = 'No se pudo abrir la cámara. Comprueba los permisos o utiliza «Elegir foto». La cámara requiere HTTPS o localhost.';
+                dialog.querySelector('[data-camera-message]').textContent = 'No se pudo abrir la cámara. Comprueba los permisos o utiliza «Galería o archivos». La cámara requiere HTTPS o localhost.';
             }
         });
         shutter.addEventListener('click', async () => {
@@ -80,14 +84,15 @@
             } catch (error) { dialog.querySelector('[data-camera-message]').textContent = error.message; }
             finally { shutter.disabled = false; }
         });
-        input.addEventListener('change', async () => {
-            if (!input.files[0] || uploading) return;
-            button.disabled = true; message.textContent = 'Reduciendo el tamaño de la foto…';
+        for (const fileInput of [input, cameraInput]) fileInput.addEventListener('change', async () => {
+            if (!fileInput.files[0] || uploading) return;
+            button.disabled = true; choose.disabled = true;
+            message.textContent = 'Reduciendo el tamaño de la foto…';
             try {
-                capture = {id: captureId(), blob: await compress(input.files[0])};
+                capture = {id: captureId(), blob: await compress(fileInput.files[0])};
                 await upload();
             } catch (error) { message.textContent = error.message; }
-            finally { input.value = ''; button.disabled = false; }
+            finally { fileInput.value = ''; button.disabled = false; choose.disabled = false; }
         });
         async function upload() {
             if (uploading || !capture) return;

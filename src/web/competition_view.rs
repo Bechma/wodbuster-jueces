@@ -74,9 +74,10 @@ pub(super) async fn detail_page(cx: &Cx, Form(query): Form<PageQuery>) -> Result
         <div class="photo-actions">
             <form method="post" action=(format!("/competitions/{id}/photos")) enctype="multipart/form-data" data-photo-upload="">
                 <input type="hidden" name="csrf" value=(csrf.clone())>
-                <input type="file" name="photo" accept="image/*" capture="environment" aria-label="Foto de la puntuación" hidden="">
+                <input type="file" name="photo" accept="image/*" data-photo-input="" aria-label="Elegir foto de la galería o archivos" hidden="">
+                <input type="file" accept="image/*" capture="environment" data-photo-camera-input="" aria-label="Tomar foto de la puntuación" hidden="">
                 <button type="button" data-photo-open="" disabled=(!has_snapshot)>"📷 Tomar foto"</button>
-                <button type="button" class="secondary" data-photo-file="" disabled=(!has_snapshot)>"Elegir foto"</button>
+                <button type="button" class="secondary" data-photo-file="" disabled=(!has_snapshot)>"Galería o archivos"</button>
                 <dialog data-photo-camera="">
                     <h2>"Foto de la puntuación"</h2>
                     <video autoplay="" playsinline="" muted="" aria-label="Vista previa de la cámara"></video>

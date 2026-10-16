@@ -28,6 +28,7 @@ fn reading(value: Option<ScoreValue>) -> ScorecardReading {
         wod_id: Some(64459),
         team_reference: Some("298682".into()),
         score_value: value,
+        judge_name: None,
         needs_retake: false,
         retake_reason: None,
     }
@@ -40,6 +41,7 @@ fn minimal_reading_has_only_the_data_needed_to_prepare_the_form() {
         "score_value":{"kind":"not_completed","repetitions":2,"tie_break":null}
     });
     let input: ScorecardReading = serde_json::from_value(input).unwrap();
+    assert!(input.judge_name.is_none());
     let result = evaluate_reading(&detail(), input);
     assert!(result.ready_for_form && result.prepared.is_some());
     assert!(result.validation_errors.is_empty());
@@ -54,6 +56,30 @@ fn minimal_reading_has_only_the_data_needed_to_prepare_the_form() {
             .as_array()
             .is_none_or(|fields| { !fields.iter().any(|field| field == "needs_retake") })
     );
+}
+
+#[test]
+fn detected_judge_is_preserved_without_changing_score_validation_or_submission() {
+    let original = reading(Some(ScoreValue::NotCompleted {
+        repetitions: 2,
+        tie_break: None,
+    }));
+    let expected = evaluate_reading(&detail(), original.clone());
+    for judge_name in [None, Some("Ana García · Juez 12".to_owned())] {
+        let mut with_judge = original.clone();
+        with_judge.judge_name = judge_name.clone();
+        let serialized = serde_json::to_value(&with_judge).unwrap();
+        let restored: ScorecardReading = serde_json::from_value(serialized).unwrap();
+        let actual = evaluate_reading(&detail(), restored);
+        assert!(actual.ready_for_form);
+        assert_eq!(actual.reading.judge_name, judge_name);
+        assert_eq!(actual.prepared, expected.prepared);
+        assert_eq!(actual.validation_errors, expected.validation_errors);
+        assert!(!actual.reading.needs_retake);
+        let plan = serde_json::to_value(actual.prepared).unwrap();
+        assert!(plan.get("judge_name").is_none());
+        assert!(!plan.to_string().contains("Ana García"));
+    }
 }
 
 #[test]

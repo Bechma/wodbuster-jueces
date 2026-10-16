@@ -24,6 +24,10 @@ pub(super) async fn table(photo: &Photo, competition: i64, csrf: &str) -> Result
             <fieldset disabled=(photo.busy())>
                 <legend>"Campos extraídos"</legend>
                 <table class="photo-fields"><tbody>
+                    <tr>
+                        <th scope="row">"Juez detectado"</th>
+                        <td><span data-photo-judge="">(photo.reading.as_ref().and_then(|r| r["judge_name"].as_str()).filter(|name| !name.trim().is_empty()).unwrap_or("No detectado"))</span> <span class="footnote">"(informativo)"</span></td>
+                    </tr>
                     for (name, label) in [
                         ("category_id", "Categoría"), ("team_reference", "Equipo"),
                         ("wod_id", "WOD"), ("kind", "Resultado"), ("time", "Tiempo"),
@@ -92,7 +96,10 @@ pub(crate) struct EditForm {
 }
 
 impl EditForm {
-    fn reading(&self) -> std::result::Result<ScorecardReading, &'static str> {
+    fn reading(
+        &self,
+        judge_name: Option<String>,
+    ) -> std::result::Result<ScorecardReading, &'static str> {
         let time =
             || MinutesSeconds::parse(&self.time).ok_or("El tiempo debe tener formato mm:ss.");
         let reps = || {
@@ -148,6 +155,7 @@ impl EditForm {
             wod_id: Some(self.wod_id.parse().map_err(|_| "WOD no válido.")?),
             team_reference: Some(self.team_reference.trim().into()),
             score_value: Some(score_value),
+            judge_name,
             needs_retake: self.needs_retake,
             retake_reason: (!self.retake_reason.trim().is_empty())
                 .then(|| self.retake_reason.trim().into()),
@@ -272,7 +280,12 @@ pub(crate) async fn edit_photo(cx: &Cx, Form(form): Form<EditForm>) -> Result<im
             "La foto está en proceso o ha cambiado. Espera a que termine y recarga la página.",
         ));
     }
-    let reading = match form.reading() {
+    let judge_name = photo
+        .reading
+        .as_ref()
+        .and_then(|r| r["judge_name"].as_str())
+        .map(str::to_owned);
+    let reading = match form.reading(judge_name) {
         Ok(r) => r,
         Err(e) => return Ok(response(StatusCode::BAD_REQUEST, e)),
     };

@@ -105,10 +105,11 @@ async fn uploads_are_private_idempotent_and_gallery_shows_extraction_warnings(
         let response=client.get(&binary).header("Cookie",&headers).send().await?;
         assert_eq!(response.headers()["content-type"],"image/png");
         assert_eq!(response.headers()["cache-control"],"no-store");
-        let reading=serde_json::json!({"category_id":16907,"wod_id":64459,"team_reference":"298682","score_value":{"kind":"not_completed","repetitions":2,"tie_break":null},"needs_retake":true,"retake_reason":"Revisar imagen"});
+        let reading=serde_json::json!({"category_id":16907,"wod_id":64459,"team_reference":"298682","score_value":{"kind":"not_completed","repetitions":2,"tie_break":null},"judge_name":"Ana <García>","needs_retake":true,"retake_reason":"Revisar imagen"});
         sqlx::query("UPDATE score_photos SET reading=$2,prepared=$3,state='succeeded' WHERE id=$1").bind(photo_id).bind(sqlx::types::Json(&reading)).bind(sqlx::types::Json(serde_json::json!({"team_name":"Team <unsafe>"}))).execute(&pool).await?;
         let html=client.get(format!("{base}/competitions/3910/photos")).header("Cookie",&headers).send().await?.text().await?;
         assert!(html.contains("Campos extraídos")&&html.contains("Guardada y verificada"));
+        assert!(html.contains("Juez detectado")&&html.contains("Ana &lt;García&gt;")&&!html.contains("name=\"judge_name\""));
         assert!(html.contains("photo-fields")&&html.contains("Guardar cambios y encolar")&&html.contains("data-photo-refresh"));
         assert!(html.contains("data-photo-delete-dialog")&&html.contains("Borrar foto definitivamente")&&html.contains("Sincronizada con Wodbuster"));
         assert!(!html.contains("<pre"));
@@ -168,6 +169,7 @@ async fn uploads_are_private_idempotent_and_gallery_shows_extraction_warnings(
         let manual=store.photo("judge@example.com",3910,photo_id).await?.unwrap();
         assert_eq!(manual.state,"parsed");assert_eq!(manual.revision,1);
         assert_eq!(manual.reading.as_ref().unwrap()["score_value"]["repetitions"],5);
+        assert_eq!(manual.reading.as_ref().unwrap()["judge_name"],"Ana <García>");
         assert_eq!(manual.prepared.as_ref().unwrap()["value"]["repetitions"],5);
         assert_eq!(manual.model,wodbuster_jueces::ai::model_name());assert_eq!(manual.provider,wodbuster_jueces::ai::PROVIDER);assert!(!manual.warning());
         assert_eq!(post_edit(edit.clone()).await?.status(),409);
@@ -272,6 +274,7 @@ async fn browser_editor_checks(
             };
         })()"#).await?;
         page.evaluate(include_str!("../src/web/photos.js")).await?;
+        assert_eq!(page.evaluate("document.querySelector('[data-photo-judge]').textContent").await?.into_value::<String>()?,"Ana <García>");
         let initial:serde_json::Value=page.evaluate("(()=>{const f=document.querySelector('[data-photo-edit]');return {category:f.elements.category_id.value,team:f.elements.team_reference.value,kind:f.elements.kind.value,reps:f.elements.repetitions.value,hidden:document.querySelector('[data-score-field=time]').hidden};})()").await?.into_value()?;
         assert_eq!(initial["category"],"16907");assert_eq!(initial["team"],"298682");
         assert_eq!(initial["kind"],"not_completed");assert_eq!(initial["reps"],"2");assert_eq!(initial["hidden"],true);
@@ -320,6 +323,7 @@ async fn browser_editor_checks(
         let refreshed:serde_json::Value=page.evaluate("({call:testCalls[2],locked:document.querySelector('fieldset').disabled,kind:document.querySelector('[name=kind]').value,revision:document.querySelector('[name=revision]').value})").await?.into_value()?;
         assert!(refreshed["call"]["url"].as_str().unwrap().ends_with("/refresh"), "{refreshed}");assert_eq!(refreshed["call"]["values"]["revision"],"1");
         assert_eq!(refreshed["locked"],true);assert_eq!(refreshed["kind"],"");assert_eq!(refreshed["revision"],"2");
+        assert_eq!(page.evaluate("document.querySelector('[data-photo-judge]').textContent").await?.into_value::<String>()?,"No detectado");
         assert_eq!(page.evaluate("document.querySelector('[data-photo-action-message]').textContent").await?.into_value::<String>()?,"Foto en cola");
         for (phase,expected) in [("parsing","Analizando la imagen"),("parsed","Puntuación en cola"),("submitting","Guardando y verificando")] {
             page.evaluate(format!("testPhotos[0].state='{phase}';")).await?;

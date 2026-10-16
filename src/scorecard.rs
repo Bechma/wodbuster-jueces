@@ -18,6 +18,9 @@ pub struct ScorecardReading {
     pub team_reference: Option<String>,
     /// Resultado tipado según score_format. Null si falta o no se puede leer con certeza.
     pub score_value: Option<ScoreValue>,
+    /// Nombre o identificador del juez escrito en la imagen. Solo informativo; null si no es legible.
+    #[serde(default)]
+    pub judge_name: Option<String>,
     /// Señal informativa para datos que no se han podido leer. No bloquea una lectura completa y válida.
     #[serde(default)]
     pub needs_retake: bool,

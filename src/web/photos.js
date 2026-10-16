@@ -241,6 +241,7 @@
         }
         item.populate = reading => {
             reading ||= {};
+            edit.querySelector('[data-photo-judge]').textContent = reading.judge_name?.trim() || 'No detectado';
             choices(field('category_id'), categories.map(c => [c.id, `${c.name} · ${c.id}`]), reading.category_id, 'Selecciona la categoría');
             categoryOptions(reading);
             field('time').value = timeText(reading.score_value?.time);

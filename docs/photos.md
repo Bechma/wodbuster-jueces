@@ -15,6 +15,12 @@ Postgres, sin duplicar el original de la cámara.
 proveedor/modelo, estado, campos extraídos y posibles errores. El estado se actualiza
 automáticamente. Las imágenes y resultados requieren la sesión de la cuenta propietaria.
 
+**Juez detectado** muestra el nombre o identificador escrito en el apartado de juez de
+la imagen. Es un dato informativo y de solo lectura: no se envía a Arena ni interviene
+en la validación o el guardado de la puntuación. Si no es legible o no aparece, muestra
+**No detectado**. Las fotos antiguas sin este dato se pueden volver a analizar con **↻**.
+Corregir la puntuación conserva el juez detectado.
+
 Cada foto tiene un botón pequeño **↻** que vuelve a encolarla desde el análisis de IA,
 con el modelo configurado actualmente; al obtener datos válidos se guarda otra vez en Arena.
 Al pulsarlo aparece inmediatamente **Solicitando nuevo análisis…**, junto al encabezado

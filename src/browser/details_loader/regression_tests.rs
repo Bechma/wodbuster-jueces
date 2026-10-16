@@ -148,7 +148,7 @@ async fn refreshed_saved_and_unsaved_scores_prepare_without_saving_or_changing_o
         ] {
             let reading=ScorecardReading {
                 category_id:Some(16907),wod_id:Some(64459+index),team_reference:Some("298682".into()),
-                score_value:Some(value),needs_retake:false,retake_reason:None,
+                score_value:Some(value),judge_name:None,needs_retake:false,retake_reason:None,
             };
             let mut plan=prepare_score(&detail,&reading).map_err(anyhow::Error::msg)?;
             plan.form.url="about:blank".into();

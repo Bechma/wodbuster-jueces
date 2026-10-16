@@ -36,6 +36,7 @@ Los segundos van de 0 a 59. "No terminado, 2 reps" significa not_completed con 2
 Cero es un resultado válido solo si se ve; un resultado ilegible es null, nunca cero por defecto.
 Si faltan datos, el formato es desconocido o hay ambigüedad entre equipos/categorías/WODs, deja los campos dudosos en null. Puedes indicar needs_retake=true y un retake_reason breve que describa los datos ausentes o ilegibles.
 No inventes identificadores, campos, tiempos ni referencias de formularios. No generes URLs ni controles HTML.
+Lee también el nombre o identificador escrito en el apartado de juez de la imagen y devuélvelo en judge_name. Transcribe solo texto legible; no deduzcas la identidad a partir de una cara o una firma ilegible, ni confundas el juez con el atleta o equipo. Si no aparece o no se puede leer, judge_name=null. Es solo informativo: su ausencia o ilegibilidad no impide preparar la puntuación ni requiere needs_retake por sí sola.
 Si puedes identificar category_id, wod_id, team_reference y score_value, devuelve esos datos: son los que permiten preparar el formulario. needs_retake y retake_reason son informativos; no controlan la preparación. Si no hay observaciones, needs_retake=false y retake_reason=null. Usa el esquema estructurado de la herramienta submit.
 "#;
 

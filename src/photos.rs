@@ -453,6 +453,7 @@ mod tests {
             wod_id: Some(64459),
             team_reference: Some("298682".into()),
             score_value: Some(ScoreValue::Repetitions { repetitions: 2 }),
+            judge_name: None,
             needs_retake: true,
             retake_reason: Some("Revisar foto".into()),
         };

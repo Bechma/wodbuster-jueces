@@ -45,6 +45,7 @@ async fn submitting_job(
             wod_id: Some(64459),
             team_reference: Some("298682".into()),
             score_value: Some(ScoreValue::Repetitions { repetitions: 2 }),
+            judge_name: None,
             needs_retake: false,
             retake_reason: None,
         },

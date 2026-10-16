@@ -302,6 +302,7 @@ mod tests {
                 repetitions: 2,
                 tie_break: None,
             }),
+            judge_name: None,
             needs_retake: false,
             retake_reason: None,
         };

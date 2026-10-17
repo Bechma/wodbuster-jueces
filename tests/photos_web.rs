@@ -82,6 +82,8 @@ async fn uploads_are_private_idempotent_and_gallery_shows_extraction_warnings(
         let headers=format!("wb_session={}; wb_csrf={}",jar.get("wb_session").unwrap().value(),jar.get("wb_csrf").unwrap().value());
         let detail=client.get(format!("{base}/competitions/3910")).header("Cookie",&headers).send().await?.text().await?;
         assert!(detail.contains("Tomar foto")&&detail.contains("capture=\"environment\"")&&detail.contains("Ver fotos"));
+        assert!(detail.contains("WOD único")&&detail.contains("WOD múltiple"));
+        assert_eq!(detail.matches("data-photo-upload=\"\"").count(),2);
         assert!(detail.contains("Fotos sin categorizar o con problemas")&&detail.contains("issues=true&amp;page=0"));
         assert!(detail.contains("Comprobar sincronización")&&detail.contains("/competitions/3910/check-sync"));
         assert!(detail.contains("Ver fotos no sincronizadas")&&detail.contains("unsynced=true&amp;page=0"));
@@ -203,6 +205,33 @@ async fn uploads_are_private_idempotent_and_gallery_shows_extraction_warnings(
         assert_eq!(client.post(&delete_url).header("Cookie",&headers).form(&[("csrf","csrf-photo-test"),("revision","2")]).send().await?.status(),200);
         assert!(store.photo_image("judge@example.com",3910,photo_id).await?.is_none());
         assert_eq!(store.competition_detail("judge@example.com",3910).await?,snapshot_before);
+        // El modo múltiple se conserva, y el servidor permite añadir/quitar el segundo resultado.
+        let multiple_id=Uuid::new_v4();
+        let multiple_upload=upload("csrf-photo-test",multiple_id).text("expected_results","2");
+        assert_eq!(client.post(format!("{base}/competitions/3910/photos")).header("Cookie",&headers).multipart(multiple_upload).send().await?.status(),200);
+        assert_eq!(store.photo("judge@example.com",3910,multiple_id).await?.unwrap().expected_results,2);
+        assert_eq!(client.post(format!("{base}/competitions/3910/photos")).header("Cookie",&headers).multipart(upload("csrf-photo-test",Uuid::new_v4()).text("expected_results","3")).send().await?.status(),400);
+        let mut multiple_detail=snapshot_before.clone().unwrap();
+        let mut second_wod=multiple_detail.categories[0].wods[0].clone();second_wod.id=64460;second_wod.name="Segundo WOD".into();
+        multiple_detail.categories[0].wods.push(second_wod);
+        let mut second_score=multiple_detail.categories[0].teams[0].scores[0].clone();second_score.wod_id=64460;
+        multiple_detail.categories[0].teams[0].scores.push(second_score);
+        store.save_competition_detail("judge@example.com",&multiple_detail).await?;
+        sqlx::query("UPDATE score_photos SET state='incomplete',reading=$2 WHERE id=$1").bind(multiple_id).bind(sqlx::types::Json(&reading)).execute(&pool).await?;
+        let multi_url=format!("{base}/competitions/3910/photos/{multiple_id}/edit");
+        let mut multi_edit=edit.clone();multi_edit.extend([("results_count","2"),("wod_id_2","64460"),("kind_2","completed"),("time_2","06:42")]);
+        let mut invalid=multi_edit.clone();invalid.iter_mut().find(|(key,_)|*key=="time_2").unwrap().1="06:99";
+        assert_eq!(client.post(&multi_url).header("Cookie",&headers).form(&invalid).send().await?.status(),400);
+        assert_eq!(store.photo("judge@example.com",3910,multiple_id).await?.unwrap().state,"incomplete");
+        assert_eq!(client.post(&multi_url).header("Cookie",&headers).form(&multi_edit).send().await?.status(),200);
+        let multiple=store.photo("judge@example.com",3910,multiple_id).await?.unwrap();
+        assert_eq!(multiple.reading.as_ref().unwrap()["results"][1]["score_value"]["time"]["seconds"],42);
+        assert_eq!(multiple.reading.as_ref().unwrap()["judge_name"],"Ana <García>");
+        assert_eq!(multiple.prepared.as_ref().unwrap().as_array().unwrap().len(),2);
+        sqlx::query("UPDATE score_photos SET state='failed' WHERE id=$1").bind(multiple_id).execute(&pool).await?;
+        let mut single_edit=edit.clone();single_edit.iter_mut().find(|(key,_)|*key=="revision").unwrap().1="1";
+        assert_eq!(client.post(&multi_url).header("Cookie",&headers).form(&single_edit).send().await?.status(),200);
+        assert_eq!(store.photo("judge@example.com",3910,multiple_id).await?.unwrap().expected_results,1);
         // El botón consulta Arena mediante el trabajo asíncrono, protegido y deduplicado.
         let sync_url=format!("{base}/competitions/3910/check-sync");
         assert_eq!(client.post(&sync_url).header("Cookie",&headers).form(&[("csrf","forged")]).send().await?.status(),403);
@@ -279,7 +308,7 @@ async fn browser_editor_checks(
         assert_eq!(initial["category"],"16907");assert_eq!(initial["team"],"298682");
         assert_eq!(initial["kind"],"not_completed");assert_eq!(initial["reps"],"2");assert_eq!(initial["hidden"],true);
         let readonly:serde_json::Value=page.evaluate("({value:document.querySelector('[data-field-value=repetitions]').textContent,closed:document.querySelector('[data-field-control=repetitions]').hidden,saveDisabled:document.querySelector('[data-photo-save]').disabled,buttons:document.querySelectorAll('[data-field-edit]').length})").await?.into_value()?;
-        assert_eq!(readonly["value"],"2");assert_eq!(readonly["closed"],true);assert_eq!(readonly["saveDisabled"],true);assert_eq!(readonly["buttons"],10);
+        assert_eq!(readonly["value"],"2");assert_eq!(readonly["closed"],true);assert_eq!(readonly["saveDisabled"],true);assert_eq!(readonly["buttons"],17);
         // Abrir y cancelar el modal no envía ninguna petición de borrado.
         page.evaluate("document.querySelector('[data-photo-delete-open]').click()").await?;
         assert!(page.evaluate("document.querySelector('[data-photo-delete-dialog]').open && testCalls.length===0").await?.into_value::<bool>()?);
@@ -367,9 +396,53 @@ async fn browser_editor_checks(
         page.evaluate("document.querySelector('[data-photo-delete-open]').click();document.querySelector('[data-photo-delete]').requestSubmit()").await?;
         for _ in 0..30 {if page.evaluate("!document.querySelector('[data-photo-id]')").await?.into_value::<bool>()? {break;}tokio::time::sleep(std::time::Duration::from_millis(20)).await;}
         assert!(page.evaluate("testCalls.length===1 && testCalls[0].url.endsWith('/delete') && !document.querySelector('[data-photo-id]') && !document.querySelector('[data-photo-list-feedback]').hidden").await?.into_value::<bool>()?);
+        // Dos resultados mantienen sus formatos y una edición pendiente común a la scorecard.
+        page.set_content(html).await?;
+        page.evaluate(format!("window.testPhotos={photos};window.testCalls=[];")).await?;
+        page.evaluate(r#"(()=>{
+            const gallery=document.querySelector('[data-photo-gallery]');
+            const context=JSON.parse(gallery.dataset.photoContext);
+            context[0].wods.push({...context[0].wods[0],id:64460,name:'Segundo WOD'});
+            gallery.dataset.photoContext=JSON.stringify(context);
+            const card=document.querySelector('[data-photo-id]');
+            const reading={category_id:16907,team_reference:'298682',judge_name:'Ana <García>',needs_retake:false,retake_reason:null,
+                results:[{wod_id:64459,score_value:{kind:'not_completed',repetitions:2,tie_break:null}},
+                         {wod_id:64460,score_value:{kind:'completed',time:{minutes:6,seconds:42},tie_break:null}}]};
+            card.dataset.photoReading=JSON.stringify(reading);
+            testPhotos[0].reading=reading;testPhotos[0].expected_results=2;
+            testPhotos[0].busy=false;testPhotos[0].state='succeeded';
+        })()"#).await?;
+        page.evaluate(include_str!("../src/web/photos.js")).await?;
+        assert!(page.evaluate("document.querySelector('[name=results_count]').value==='2' && document.querySelector('[name=repetitions]').value==='2' && document.querySelector('[name=time_2]').value==='06:42' && !document.querySelector('[data-score-field=time_2]').hidden && document.querySelector('[name=repetitions_2]').disabled").await?.into_value::<bool>()?);
+        page.evaluate("document.querySelector('[data-field-edit=time_2]').click();document.querySelector('[name=time_2]').value='07:10';document.querySelector('[name=time_2]').dispatchEvent(new Event('input',{bubbles:true}));").await?;
+        page.evaluate("testPoll()").await?;
+        assert!(page.evaluate("document.querySelector('[name=time_2]').value==='07:10' && !document.querySelector('[data-photo-save]').disabled && document.querySelectorAll('tr.is-modified').length===1").await?.into_value::<bool>()?);
+        page.evaluate("document.querySelector('[name=results_count]').value='1';document.querySelector('[name=results_count]').dispatchEvent(new Event('change',{bubbles:true}));").await?;
+        assert!(page.evaluate("document.querySelector('[data-photo-field=wod_id_2]').hidden && document.querySelector('[name=time_2]').disabled && !new FormData(document.querySelector('[data-photo-edit]')).has('time_2')").await?.into_value::<bool>()?);
+        page.evaluate("document.querySelector('[name=results_count]').value='2';document.querySelector('[name=results_count]').dispatchEvent(new Event('change',{bubbles:true}));").await?;
+        assert_eq!(page.evaluate("document.querySelector('[name=time_2]').value").await?.into_value::<String>()?,"07:10");
+        save_test_screenshot(&page,"multiple-scorecard-editor.png").await?;
         page.set_content(detail_html).await?;
         assert!(page.evaluate("!!document.querySelector('.photo-tools button') && document.querySelector('.photo-tools button').textContent==='Comprobar sincronización'").await?.into_value::<bool>()?);
         save_test_screenshot(&page,"competition-photo-actions.png").await?;
+        // Ambas opciones de captura envían su modo junto con la misma compresión existente.
+        page.evaluate(r#"(()=>{
+            window.captureCalls=[];
+            window.fetch=async(url,options)=>{captureCalls.push({count:options.body.get('expected_results'),id:options.body.get('capture_id'),bytes:options.body.get('photo').size});return {ok:true,json:async()=>({id:'ok'})};};
+        })()"#).await?;
+        page.evaluate(include_str!("../src/web/photos.js")).await?;
+        page.evaluate(r#"(async()=>{
+            const canvas=document.createElement('canvas');canvas.width=100;canvas.height=100;
+            const blob=await new Promise(resolve=>canvas.toBlob(resolve,'image/png'));
+            for(const input of document.querySelectorAll('[data-photo-input]')) {
+                const data=new DataTransfer();data.items.add(new File([blob],'score.png',{type:'image/png'}));
+                input.files=data.files;input.dispatchEvent(new Event('change'));
+            }
+        })()"#).await?;
+        for _ in 0..30 {if page.evaluate("captureCalls.length===2").await?.into_value::<bool>()? {break;}tokio::time::sleep(std::time::Duration::from_millis(20)).await;}
+        let captures:serde_json::Value=page.evaluate("captureCalls.sort((a,b)=>Number(a.count)-Number(b.count))").await?.into_value()?;
+        assert_eq!(captures[0]["count"],"1");assert_eq!(captures[1]["count"],"2");
+        assert_ne!(captures[0]["id"],captures[1]["id"]);
         Ok::<_,anyhow::Error>(())
     }.await;
     let _ = browser.dispose_browser_context(context).await;

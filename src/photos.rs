@@ -1,7 +1,9 @@
 //! Cola persistente de fotos: un único worker global extrae y envía puntuaciones.
+#[cfg(test)]
+use crate::scorecard::{ScorecardReading, evaluate_reading, evaluate_scorecard};
 use crate::{
     AppState,
-    scorecard::{ScorecardReading, evaluate_reading},
+    scorecard::{Scorecard, evaluate_scorecard_expected},
 };
 use anyhow::{Context, ensure};
 use futures_util::FutureExt;
@@ -43,6 +45,8 @@ pub struct Photo {
     pub prepared: Option<Value>,
     pub validation_errors: Value,
     pub error: Option<String>,
+    pub result: Option<Value>,
+    pub expected_results: i16,
     pub created_at: String,
     #[sqlx(default)]
     pub duplicate_count: i64,
@@ -54,9 +58,83 @@ pub struct Photo {
     pub sync_checked_at: Option<String>,
     #[sqlx(default)]
     pub arena_value: Option<Value>,
+    #[sqlx(default)]
+    pub result_checks: Value,
 }
 
 impl Photo {
+    pub fn result_summary(&self) -> String {
+        let Some(reading) = &self.reading else {
+            return String::new();
+        };
+        let results = reading
+            .get("results")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_else(|| vec![reading.clone()]);
+        let confirmations = self
+            .result
+            .as_ref()
+            .map(|value| {
+                value
+                    .as_array()
+                    .cloned()
+                    .unwrap_or_else(|| vec![value.clone()])
+            })
+            .unwrap_or_default();
+        results
+            .iter()
+            .enumerate()
+            .map(|(index, result)| {
+                let id = result["wod_id"].as_i64();
+                let name = self
+                    .prepared
+                    .as_ref()
+                    .and_then(|plans| {
+                        let plan = plans.as_array().and_then(|p| p.get(index)).unwrap_or(plans);
+                        plan["wod_name"].as_str()
+                    })
+                    .map(str::to_owned)
+                    .unwrap_or_else(|| {
+                        id.map(|id| format!("WOD {id}"))
+                            .unwrap_or_else(|| format!("Resultado {}", index + 1))
+                    });
+                let confirmed = id.is_some()
+                    && confirmations
+                        .iter()
+                        .any(|score| score["wod_id"].as_i64() == id);
+                let sync = self
+                    .result_checks
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .find(|check| {
+                        check["wod_id"]
+                            .as_str()
+                            .and_then(|id| id.parse::<i64>().ok())
+                            == id
+                    })
+                    .and_then(|check| check["sync_status"].as_str());
+                let comparison = match sync {
+                    Some("synced") => "coincide con Arena",
+                    Some("different") => "difiere de Arena",
+                    Some("superseded") => "se compara una foto posterior",
+                    Some("unavailable") => "no comparable",
+                    _ => "sin comprobar",
+                };
+                format!(
+                    "{name}: {}; {comparison}",
+                    if confirmed {
+                        "guardado y verificado"
+                    } else {
+                        "sin confirmación de guardado"
+                    }
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(" · ")
+    }
+
     pub fn sync_label(&self) -> &'static str {
         match self.sync_status.as_str() {
             "synced" => "Sincronizada con Wodbuster",
@@ -86,6 +164,9 @@ impl Photo {
             }
             "unconfirmed" => {
                 "No se pudo confirmar el guardado. Comprueba Arena antes de repetirlo."
+            }
+            "saved_local_failed" if self.expected_results == 2 => {
+                "Hay resultados confirmados en Arena; falta actualizar la copia local de la scorecard."
             }
             "saved_local_failed" => {
                 "Arena confirmó la puntuación; falta actualizar la copia local."
@@ -117,6 +198,9 @@ impl Photo {
             "succeeded" => "Guardada y verificada",
             "incomplete" => "Faltan datos o no son válidos",
             "unconfirmed" => "Envío sin confirmar: comprueba Arena",
+            "saved_local_failed" if self.expected_results == 2 => {
+                "Scorecard con resultados guardados; falta actualizar la copia local"
+            }
             "saved_local_failed" => "Guardada en Arena; falta actualizar la copia local",
             _ => "Error",
         }
@@ -133,6 +217,7 @@ pub struct NewPhoto<'a> {
     pub width: i32,
     pub height: i32,
     pub model: &'a str,
+    pub expected_results: i16,
 }
 
 /// Comprueba el contenido, sin confiar en la extensión ni en el MIME del navegador.
@@ -227,30 +312,32 @@ async fn process(state: &AppState, photo: &Photo) -> anyhow::Result<()> {
             .photo_image(&photo.username, photo.competition_id, photo.id)
             .await?
             .context("Foto no disponible")?;
-        let mut reading = crate::ai::extract(bytes, &detail, &photo.model).await?;
+        let mut reading =
+            crate::ai::extract_expected(bytes, &detail, &photo.model, Some(photo.expected_results))
+                .await?;
         let blocks = state
             .store
             .submission_blocks(&photo.username, photo.competition_id)
             .await?;
-        if reject_if_blocked(&state.store, photo, &detail, &mut reading, &blocks).await? {
+        if reject_scorecard_if_blocked(&state.store, photo, &detail, &mut reading, &blocks).await? {
             return Ok(());
         }
-        let result = evaluate_reading(&detail, reading);
-        state.store.parsed_photo(photo, &result).await?;
+        let result = evaluate_scorecard_expected(&detail, reading, photo.expected_results);
+        state.store.parsed_scorecard(photo, &result).await?;
         return Ok(());
     }
-    let mut reading: ScorecardReading =
-        serde_json::from_value(photo.reading.clone().context("Falta la lectura de IA")?)?;
+    let mut reading =
+        Scorecard::from_value(photo.reading.clone().context("Falta la lectura de IA")?)?;
     let blocks = state
         .store
         .submission_blocks(&photo.username, photo.competition_id)
         .await?;
-    if reject_if_blocked(&state.store, photo, &detail, &mut reading, &blocks).await? {
+    if reject_scorecard_if_blocked(&state.store, photo, &detail, &mut reading, &blocks).await? {
         return Ok(());
     }
-    let prepared = evaluate_reading(&detail, reading.clone());
-    let Some(plan) = &prepared.prepared else {
-        state.store.parsed_photo(photo, &prepared).await?;
+    let prepared = evaluate_scorecard_expected(&detail, reading.clone(), photo.expected_results);
+    let Some(plans) = &prepared.prepared else {
+        state.store.parsed_scorecard(photo, &prepared).await?;
         return Ok(());
     };
     let session = state
@@ -263,53 +350,101 @@ async fn process(state: &AppState, photo: &Photo) -> anyhow::Result<()> {
         session.username.eq_ignore_ascii_case(&photo.username),
         "La sesión no corresponde a la foto"
     );
-    let submission = loop {
+    let readings = reading.readings();
+    let mut index = 0;
+    while index < plans.len() {
         let (guard, blocks) = state
             .store
             .submission_guard(&photo.username, photo.competition_id)
             .await?;
-        if let Some(reason) = crate::submission_blocks::enforce(&detail, &mut reading, &blocks) {
-            // Ya no se enviará nada: libera la conexión antes de persistir el rechazo.
+        if let Some(reason) =
+            crate::submission_blocks::enforce_scorecard(&detail, &mut reading, &blocks)
+        {
             guard.commit().await?;
+            let reason = if index > 0 {
+                format!(
+                    "{reason} Ya se han confirmado {index} de {} resultados en Arena.",
+                    plans.len()
+                )
+            } else {
+                reason
+            };
             state
                 .store
-                .reject_blocked_photo(photo, &reading, &reason)
+                .reject_blocked_scorecard(photo, &reading, &reason)
                 .await?;
             return Ok(());
         }
-        let result = state
-            .browser
-            .submit_score(&session.cookie, &detail, &prepared.reading)
-            .await;
-        // Libera también antes de esperar a Browserless: el siguiente intento relee los bloqueos.
-        guard.commit().await?;
-        if result.as_ref().is_err_and(|error| error.busy) {
-            tokio::time::sleep(Duration::from_secs(1)).await;
-            continue;
+        // El bloqueo de configuración cubre el conjunto mientras Arena está disponible.
+        while index < plans.len() {
+            match state
+                .browser
+                .submit_score(&session.cookie, &detail, &readings[index])
+                .await
+            {
+                Ok(score) => {
+                    if !persist_confirmed_photo(&state.store, photo, &plans[index], &score).await? {
+                        guard.commit().await?;
+                        return Ok(());
+                    }
+                    index += 1;
+                }
+                Err(error) if error.busy => break,
+                Err(error) => {
+                    guard.commit().await?;
+                    let message = format!(
+                        "WOD «{}»: {}. Confirmados {index} de {} resultados. La incidencia afecta a toda la scorecard.{}",
+                        plans[index].wod_name,
+                        error,
+                        plans.len(),
+                        if error.save_attempted {
+                            " Comprueba Arena antes de repetir el envío."
+                        } else {
+                            ""
+                        }
+                    );
+                    state
+                        .store
+                        .finish_photo(
+                            photo,
+                            if error.save_attempted {
+                                "unconfirmed"
+                            } else {
+                                "failed"
+                            },
+                            Some(&message),
+                            None,
+                        )
+                        .await?;
+                    return Ok(());
+                }
+            }
         }
-        break result;
-    };
-    match submission {
-        Ok(score) => persist_confirmed_photo(&state.store, photo, plan, &score).await?,
-        Err(error) => {
-            state
-                .store
-                .finish_photo(
-                    photo,
-                    if error.save_attempted {
-                        "unconfirmed"
-                    } else {
-                        "failed"
-                    },
-                    Some(&error.to_string()),
-                    None,
-                )
-                .await?;
+        guard.commit().await?;
+        if index < plans.len() {
+            tokio::time::sleep(Duration::from_secs(1)).await;
         }
     }
     Ok(())
 }
 
+async fn reject_scorecard_if_blocked(
+    store: &crate::storage::SessionStore,
+    photo: &Photo,
+    detail: &crate::details::CompetitionDetail,
+    reading: &mut Scorecard,
+    blocks: &[crate::submission_blocks::SubmissionBlock],
+) -> anyhow::Result<bool> {
+    let Some(reason) = crate::submission_blocks::enforce_scorecard(detail, reading, blocks) else {
+        return Ok(false);
+    };
+    store
+        .reject_blocked_scorecard(photo, reading, &reason)
+        .await?;
+    Ok(true)
+}
+
+#[cfg(test)]
 async fn reject_if_blocked(
     store: &crate::storage::SessionStore,
     photo: &Photo,
@@ -329,18 +464,20 @@ async fn persist_confirmed_photo(
     photo: &Photo,
     plan: &crate::scorecard::PreparedScore,
     score: &crate::details::Score,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<bool> {
     if !store.confirm_photo(photo, score).await? {
-        return Ok(()); // La revisión ya no pertenece a este worker.
+        return Ok(false); // La revisión ya no pertenece a este worker.
     }
-    if store
+    match store
         .save_confirmed_photo_score(photo, plan.category_id, &plan.team_reference, score)
         .await
-        .is_err()
     {
-        store.fail_photo(photo, "saved_local_failed", "Arena confirmó la puntuación, pero falló su copia local. Refresca la competición; no repitas el envío.").await?;
+        Ok(active) => Ok(active),
+        Err(_) => {
+            store.fail_photo(photo, "saved_local_failed", "Arena confirmó la puntuación, pero falló su copia local. Refresca la competición; no repitas el envío.").await?;
+            Ok(false)
+        }
     }
-    Ok(())
 }
 
 #[cfg(test)]
@@ -469,6 +606,7 @@ mod tests {
                     width: w,
                     height: h,
                     model: "test-model",
+                    expected_results: 1,
                 })
                 .await?;
         }
@@ -587,6 +725,7 @@ mod tests {
                 width: w,
                 height: h,
                 model: "gemini-3.8-flash",
+                expected_results: 1,
             })
             .await?;
         sqlx::query("UPDATE score_photos SET provider='google-gemini' WHERE id=$1")

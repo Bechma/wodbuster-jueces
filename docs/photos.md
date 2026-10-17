@@ -1,8 +1,15 @@
 # Fotos de puntuaciones
 
-En `/competitions/{id}`, **📷 Tomar foto** abre una vista previa de la cámara.
-**Elegir foto** permite seleccionar una imagen o utilizar la captura nativa del dispositivo.
+En `/competitions/{id}` hay dos opciones: **WOD único** espera un resultado y
+**WOD múltiple** espera dos resultados. Cada opción tiene **📷 Tomar foto** y
+**Galería o archivos**. Comparten la vista previa y la captura nativa del dispositivo.
 La cámara en directo requiere HTTPS o localhost y permiso del navegador.
+
+Cada scorecard conserva una sola imagen, categoría, equipo, juez y estado de incidencias.
+La IA devuelve uno o dos resultados tipados por WOD. Si el número no coincide con el modo
+elegido, falta un resultado, se repite un WOD o cualquier puntuación no es válida, no se
+envía ninguno. Un bloqueo de cualquiera de sus WODs también impide enviar toda la scorecard.
+Las fotos existentes siguen siendo de WOD único y conservan sus lecturas y confirmaciones.
 
 La imagen se orienta y comprime en el dispositivo antes de subirla: máximo 1920 píxeles
 en el lado mayor, WebP con calidad 0,82 (0,75 si supera 350 KB), con JPEG como alternativa.
@@ -21,8 +28,15 @@ en la validación o el guardado de la puntuación. Si no es legible o no aparece
 **No detectado**. Las fotos antiguas sin este dato se pueden volver a analizar con **↻**.
 Corregir la puntuación conserva el juez detectado.
 
+**Número de WODs** permite añadir el segundo resultado o quitarlo si se detectó por error.
+Los dos resultados tienen WOD, formato, tiempo, repeticiones, peso y desempate propios.
+Guardar valida el conjunto y encola ambos; quitar un resultado no borra la imagen ni
+modifica por sí mismo las puntuaciones que ya existen en Arena.
+
 Cada foto tiene un botón pequeño **↻** que vuelve a encolarla desde el análisis de IA,
 con el modelo configurado actualmente; al obtener datos válidos se guarda otra vez en Arena.
+En una scorecard múltiple se vuelven a analizar y enviar ambos resultados, incluidos
+los que se hubieran guardado en un intento anterior.
 Al pulsarlo aparece inmediatamente **Solicitando nuevo análisis…**, junto al encabezado
 de la foto. El icono gira mientras se solicita o procesa el trabajo, y el aviso va mostrando
 cola, análisis, preparación, guardado y resultado final. Si falla la solicitud o la consulta
@@ -61,6 +75,7 @@ categoría. Cada WOD tiene **Ver fotos por WOD**, que mantiene la categoría sel
 cada equipo tiene **Ver fotos por equipo**, que incluye sus fotos de todos los WODs
 de esa categoría. Las vistas reutilizan la galería con sus estados y controles de edición.
 El filtro se conserva al paginar y al consultar los estados en segundo plano.
+El filtro de cualquiera de los dos WODs muestra la scorecard completa una sola vez.
 Se usa la lectura actual de cada foto, incluidas las correcciones manuales: una foto
 sin categoría asignada aparece en la galería general y en **Fotos sin categorizar o
 con problemas**. Este nuevo botón también incluye categorías que ya no existen en
@@ -80,6 +95,9 @@ su comprobación y la fecha de los datos de Arena utilizados. La comparación ut
 los valores estructurados del formato, incluidos tiempo, repeticiones, kg y desempate;
 una puntuación ausente nunca equivale a cero. La comprobación consulta los resultados
 y no guarda puntuaciones en Wodbuster.
+En las scorecards múltiples se compara cada resultado por separado y se muestra su
+comprobación junto a la confirmación de guardado. Una diferencia o un resultado no
+comparable afecta a la scorecard completa. Los resúmenes cuentan imágenes, no WODs.
 
 **Ver fotos no sincronizadas** abre `/competitions/{id}/photos?unsynced=true`.
 Muestra las diferencias confirmadas con los últimos datos consultados de Arena,
@@ -104,11 +122,18 @@ se inicia más de una instancia de la aplicación. Procesa una foto cada vez:
    y modelo elegidos al subir la imagen. Si faltan datos queda en `incomplete`.
 4. `parsed` → `submitting`: vuelve a validar contra el contexto actual y reutiliza
    `ArenaBrowser::submit_score`. Espera si los navegadores de la aplicación están ocupados.
-5. Abre **Edit** cuando corresponde, rellena y guarda únicamente el WOD seleccionado.
-   Relee la vista de juez para verificar el resultado y actualiza la puntuación local.
-6. Persiste primero la confirmación remota manteniendo `submitting` y las acciones
-   bloqueadas. Actualiza la puntuación local y termina en `succeeded` en una misma
-   transacción; si falla esa copia, termina en `saved_local_failed`.
+5. Abre **Edit** cuando corresponde y guarda los WODs de la scorecard en orden.
+   Relee la vista de juez para verificar cada resultado y actualiza su puntuación local.
+6. Persiste primero cada confirmación remota manteniendo `submitting` y las acciones
+   bloqueadas. Solo termina en `succeeded` tras confirmar y copiar localmente todos
+   los resultados; si falla una copia, termina en `saved_local_failed`.
+
+Arena guarda cada WOD por separado. Si el primero se confirma y el segundo falla,
+se conserva el primero y toda la scorecard queda con incidencia, indicando el WOD que
+falló y cuántos resultados se confirmaron. Un fallo posterior a pulsar Guardar queda
+en `unconfirmed`; nunca se reintenta automáticamente. Tras una interrupción, una
+confirmación parcial también queda en `unconfirmed`, conservando las confirmaciones.
+El usuario puede revisar Arena y reintentar explícitamente la scorecard completa.
 
 Al cargar los detalles, los WODs ya guardados se abren con **Edit** para capturar sus
 campos y el control real de **Guardar**. La exploración de formatos nunca guarda
@@ -119,12 +144,13 @@ snapshots anteriores que solo contienen **Edit** necesitan refrescarse una vez.
 Si `needs_retake` es `true`, pero los campos son suficientes y válidos, continúa el envío.
 La galería muestra un aviso cuando Arena confirma el guardado de esa lectura.
 
-`failed` conserva el error de extracción o de un envío que no llegó a guardar.
+`failed` conserva el error de extracción o de un WOD cuyo envío no llegó a guardar;
+si hubo otro resultado confirmado antes del fallo, también lo conserva.
 `unconfirmed` indica que hay que comprobar Arena antes de repetir el envío.
 `saved_local_failed` conserva la confirmación remota si falta actualizar la caché local.
 Un reinicio reanuda el análisis interrumpido e invalida la revisión del worker anterior.
-Un envío interrumpido se marca como `unconfirmed` si no hay confirmación persistida,
-o `saved_local_failed` si Arena ya lo confirmó; ninguno se repite automáticamente. Una petición de subida repetida con el
+Un envío interrumpido se marca como `unconfirmed` si falta confirmar algún resultado,
+o `saved_local_failed` si Arena ya confirmó todos; ninguno se repite automáticamente. Una petición de subida repetida con el
 mismo UUID no duplica la foto ni el trabajo.
 
 Se utiliza la sesión OAuth creada con `cargo run --example chatgpt_login`, guardada en

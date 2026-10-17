@@ -53,6 +53,8 @@
         dialog.querySelector('[data-photo-cancel]').addEventListener('click', () => dialog.close());
         choose.addEventListener('click', () => input.click());
         const message = form.querySelector('[data-photo-message]');
+        const captureLabel = button.textContent;
+        const expectedResults = form.dataset.expectedResults || '1';
         let capture = null;
         let uploading = false;
         button.addEventListener('click', async () => {
@@ -102,12 +104,13 @@
                 const body = new FormData();
                 body.append('csrf', form.querySelector('[name=csrf]').value);
                 body.append('capture_id', capture.id);
+                body.append('expected_results', expectedResults);
                 body.append('photo', capture.blob, 'puntuacion.' + (capture.blob.type === 'image/webp' ? 'webp' : 'jpg'));
                 const response = await fetch(form.action, {method: 'POST', body, credentials: 'same-origin'});
                 if (!response.ok) throw new Error(response.status === 401 ? 'La sesión ha caducado. Inicia sesión de nuevo.' : 'No se pudo subir la foto. Comprueba que la competición tenga sus detalles cargados.');
                 await response.json();
                 message.textContent = 'Foto guardada. La IA y el guardado en Wodbuster continúan en segundo plano. Puedes consultar «Ver fotos». ' + Math.round(capture.blob.size / 1024) + ' KB.';
-                capture = null; button.textContent = '📷 Tomar foto';
+                capture = null; button.textContent = captureLabel;
             } catch (error) {
                 message.textContent = error.message;
                 button.textContent = 'Reintentar subida'; // Reutiliza el UUID para evitar duplicar el trabajo.
@@ -213,41 +216,56 @@
             } finally { item.pending = false; item.lock(); actionGeneration++; await refresh(); }
         });
         const selectedCategory = () => categories.find(c => String(c.id) === field('category_id').value);
-        const selectedWod = () => selectedCategory()?.wods.find(w => String(w.id) === field('wod_id').value);
-        function scoreFields() {
-            const kind = field('kind').value;
+        const selectedWod = (suffix = '') => selectedCategory()?.wods.find(w => String(w.id) === field('wod_id' + suffix).value);
+        function scoreFields(suffix = '') {
+            const active = suffix === '' || field('results_count').value === '2';
+            const kind = field('kind' + suffix).value;
+            if (suffix) for (const name of ['wod_id', 'kind', 'time', 'repetitions', 'kilograms', 'tie_break']) {
+                card.querySelector(`[data-photo-field="${name}${suffix}"]`).hidden = !active;
+                field(name + suffix).disabled = !active;
+                field(name + suffix).required = active && ['wod_id', 'kind'].includes(name);
+                if (!active) item.open.delete(name + suffix);
+            }
             const visible = {
-                time: ['completed', 'time'].includes(kind),
-                repetitions: ['not_completed', 'repetitions'].includes(kind),
-                kilograms: kind === 'weight',
-                tie_break: !!selectedWod()?.tie_break && ['completed', 'not_completed'].includes(kind)
+                time: active && ['completed', 'time'].includes(kind),
+                repetitions: active && ['not_completed', 'repetitions'].includes(kind),
+                kilograms: active && kind === 'weight',
+                tie_break: active && !!selectedWod(suffix)?.tie_break && ['completed', 'not_completed'].includes(kind)
             };
             for (const [name, show] of Object.entries(visible)) {
-                card.querySelector(`[data-score-field="${name}"]`).hidden = !show;
-                field(name).disabled = !show;
-                field(name).required = show && name !== 'tie_break';
-                if (!show) item.open.delete(name);
+                card.querySelector(`[data-score-field="${name}${suffix}"]`).hidden = !show;
+                field(name + suffix).disabled = !show;
+                field(name + suffix).required = show && name !== 'tie_break';
+                if (!show) item.open.delete(name + suffix);
             }
         }
-        function wodOptions(value) {
-            choices(field('kind'), allowedKinds(selectedWod()?.kind).map(k => [k, kindNames[k]]), value, 'Selecciona el resultado');
-            scoreFields();
+        function wodOptions(value, suffix = '') {
+            choices(field('kind' + suffix), allowedKinds(selectedWod(suffix)?.kind).map(k => [k, kindNames[k]]), value, 'Selecciona el resultado');
+            scoreFields(suffix);
         }
         function categoryOptions(reading) {
             const category = selectedCategory();
             choices(field('team_reference'), (category?.teams || []).map(t => [t.reference, `${t.name} · ${t.reference}`]), reading.team_reference, 'Selecciona el equipo');
-            choices(field('wod_id'), (category?.wods || []).map(w => [w.id, `${w.name} · ${w.id}`]), reading.wod_id, 'Selecciona el WOD');
-            wodOptions(reading.score_value?.kind);
+            const results = reading.results || [reading];
+            for (const [index, suffix] of ['', '_2'].entries()) {
+                choices(field('wod_id' + suffix), (category?.wods || []).map(w => [w.id, `${w.name} · ${w.id}`]), results[index]?.wod_id, 'Selecciona el WOD');
+                wodOptions(results[index]?.score_value?.kind, suffix);
+            }
         }
         item.populate = reading => {
             reading ||= {};
             edit.querySelector('[data-photo-judge]').textContent = reading.judge_name?.trim() || 'No detectado';
+            const results = reading.results || [reading];
+            field('results_count').value = String(reading.results?.length || (reading.wod_id !== undefined ? 1 : card.dataset.expectedResults || 1));
             choices(field('category_id'), categories.map(c => [c.id, `${c.name} · ${c.id}`]), reading.category_id, 'Selecciona la categoría');
             categoryOptions(reading);
-            field('time').value = timeText(reading.score_value?.time);
-            field('repetitions').value = reading.score_value?.repetitions ?? '';
-            field('kilograms').value = reading.score_value?.kilograms ?? '';
-            field('tie_break').value = timeText(reading.score_value?.tie_break);
+            for (const [index, suffix] of ['', '_2'].entries()) {
+                const value = results[index]?.score_value;
+                field('time' + suffix).value = timeText(value?.time);
+                field('repetitions' + suffix).value = value?.repetitions ?? '';
+                field('kilograms' + suffix).value = value?.kilograms ?? '';
+                field('tie_break' + suffix).value = timeText(value?.tie_break);
+            }
             field('needs_retake').value = String(!!reading.needs_retake);
             field('retake_reason').value = reading.retake_reason || '';
             item.snapshot();
@@ -256,8 +274,11 @@
         item.populate(initial);
         item.signature = JSON.stringify(initial);
         field('category_id').addEventListener('change', () => categoryOptions({}));
-        field('wod_id').addEventListener('change', () => wodOptions(field('kind').value));
-        field('kind').addEventListener('change', scoreFields);
+        for (const suffix of ['', '_2']) {
+            field('wod_id' + suffix).addEventListener('change', () => wodOptions(field('kind' + suffix).value, suffix));
+            field('kind' + suffix).addEventListener('change', () => scoreFields(suffix));
+        }
+        field('results_count').addEventListener('change', () => scoreFields('_2'));
         edit.addEventListener('input', item.display);
         edit.addEventListener('change', item.display);
         for (const form of [edit, retry]) form.addEventListener('submit', async event => {
@@ -325,6 +346,8 @@
                 item.tracking = photo.busy;
                 card.querySelector('[data-photo-state]').textContent = photo.label;
                 card.querySelector('[data-photo-target]').textContent = photo.target;
+                card.querySelector('[data-photo-results]').textContent = photo.result_summary;
+                card.dataset.expectedResults = String(photo.expected_results);
                 card.querySelector('[data-photo-model]').textContent = `Modelo: ${photo.provider} / ${photo.model}`;
                 const sync = card.querySelector('[data-photo-sync]');
                 sync.textContent = photo.sync_label;

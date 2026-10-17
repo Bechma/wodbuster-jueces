@@ -71,6 +71,22 @@ pub fn enforce(
     Some(reason)
 }
 
+/// Una regla que afecte a cualquier resultado bloquea la scorecard completa.
+pub fn enforce_scorecard(
+    detail: &CompetitionDetail,
+    card: &mut crate::scorecard::Scorecard,
+    blocks: &[SubmissionBlock],
+) -> Option<String> {
+    for mut reading in card.readings() {
+        if let Some(reason) = enforce(detail, &mut reading, blocks) {
+            card.needs_retake = reading.needs_retake;
+            card.retake_reason = reading.retake_reason;
+            return Some(reason);
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

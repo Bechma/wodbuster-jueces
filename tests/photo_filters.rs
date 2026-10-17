@@ -49,6 +49,7 @@ async fn current_assignments_are_scoped_and_filtered_before_pagination(
                 width: 1,
                 height: 1,
                 model: "test",
+                expected_results: 1,
             })
             .await?;
         let reading = json!({"category_id":category,"wod_id":wod,"team_reference":team});

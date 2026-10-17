@@ -1,6 +1,6 @@
 # PoC de lectura de puntuaciones
 
-El ejemplo procesa una imagen con `Extractor<ScorecardReading>` de Rig y su proveedor nativo ChatGPT. La lectura usa el mismo `ScoreValue` que la aplicación y el formato concreto de cada WOD y categoría.
+El ejemplo procesa una imagen con `Extractor<Scorecard>` de Rig y su proveedor nativo ChatGPT. Una scorecard contiene uno o dos resultados del mismo equipo, categoría y juez. La lectura usa el mismo `ScoreValue` que la aplicación y el formato concreto de cada WOD y categoría.
 
 ```sh
 cargo run --example poc_agent -- foto.png contexto.json > resultado.json
@@ -24,6 +24,15 @@ La salida estándar es exclusivamente JSON. Los diagnósticos y el uso de tokens
 - `ready_for_form`: indica si la lectura y las referencias permiten preparar el formulario.
 - `prepared`: datos resueltos contra el contexto, con competición, categoría, WOD, equipo, inscripción, `gid`, puntuación y plan de formulario. Es `null` si falta información o no es compatible.
 - `validation_errors`: motivo que impide preparar el formulario. Un problema de contexto requiere refrescar sus datos; una imagen dudosa requiere otra foto.
+
+Para dos WODs, `reading` contiene los datos comunes y `results`, una lista de
+`{wod_id, score_value}`; `prepared` es una lista de dos planes. Ambos deben ser
+válidos y corresponder a WODs distintos para habilitar el envío. Un resultado
+ilegible impide enviar el conjunto. `--submit` envía los WODs en orden y devuelve
+`submissions` con las confirmaciones individuales; si falla el segundo, conserva
+en la salida la confirmación del primero. Para un WOD se conserva también el
+contrato anterior de `reading`, `prepared` y `submission`, y `--validate` acepta
+lecturas antiguas y nuevas.
 
 El valor utiliza uno de estos formatos:
 

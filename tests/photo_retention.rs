@@ -61,6 +61,7 @@ async fn migration_deletion_and_refresh_preserve_every_photo_and_its_processing_
                 width: 100,
                 height: 100,
                 model: "original-model",
+                expected_results: 1,
             })
             .await?;
         sqlx::query("UPDATE score_photos SET state=$2,reading=$3,prepared=$4,validation_errors=$5,result=$6,error=$7,revision=3 WHERE id=$1")
@@ -76,6 +77,21 @@ async fn migration_deletion_and_refresh_preserve_every_photo_and_its_processing_
     }
     let expected = photo_snapshot(&pool).await?;
     assert_eq!(expected.len(), 11);
+    // Simula la base anterior a las scorecards múltiples con datos ya existentes.
+    sqlx::raw_sql("DROP VIEW score_photo_checks; DROP VIEW score_photo_result_checks; ALTER TABLE score_photos DROP COLUMN expected_results;")
+        .execute(&pool).await?;
+    sqlx::raw_sql(include_str!("../migrations/202610150005_photo_checks.sql"))
+        .execute(&pool)
+        .await?;
+    sqlx::raw_sql(include_str!(
+        "../migrations/202610170003_multiple_wod_scorecards.sql"
+    ))
+    .execute(&pool)
+    .await?;
+    assert!(
+        photo_snapshot(&pool).await? == expected,
+        "La migración de scorecards múltiples debe conservar todos los datos existentes"
+    );
     // Simula la actualización de una base antigua con fotos ya guardadas.
     sqlx::query("ALTER TABLE score_photos ADD CONSTRAINT score_photos_username_competition_id_fkey FOREIGN KEY (username,competition_id) REFERENCES wodbuster_competitions(username,id) ON DELETE CASCADE")
         .execute(&pool).await?;

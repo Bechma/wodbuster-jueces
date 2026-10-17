@@ -316,3 +316,114 @@ fn model_context_has_formats_but_no_remote_controls_or_private_metadata() {
         compact["categories"][0]["wods"][1][2]
     );
 }
+
+#[test]
+fn scorecard_validates_all_results_and_preserves_shared_data_and_legacy_readings() {
+    use wodbuster_jueces::scorecard::{
+        Scorecard, WodReading, evaluate_scorecard, evaluate_scorecard_expected,
+    };
+    let mut detail = detail();
+    let mut wod = detail.categories[0].wods[0].clone();
+    wod.id += 1;
+    wod.name = "Segundo WOD".into();
+    // Distintos formatos y controles para asegurar que cada plan usa su WOD.
+    wod.score_format = ScoreFormat::from_fields(&json!([field("IoWeight")]));
+    let mut score = detail.categories[0].teams[0].scores[0].clone();
+    score.wod_id = wod.id;
+    score.metadata["fields"] = json!([field("IoWeight")]);
+    detail.categories[0].teams[0].scores.push(score);
+    detail.categories[0].wods.push(wod);
+    let mut original = reading(Some(ScoreValue::NotCompleted {
+        repetitions: 2,
+        tie_break: None,
+    }));
+    original.judge_name = Some("Ana".into());
+    let legacy = serde_json::to_value(&original).unwrap();
+    let mut card = Scorecard::from_value(legacy.clone()).unwrap();
+    assert_eq!(card.stored_reading(), legacy);
+    let single = evaluate_scorecard(&detail, card.clone());
+    assert!(single.ready_for_form);
+    assert!(single.stored_prepared().unwrap().is_object());
+    let missing = evaluate_scorecard_expected(&detail, card.clone(), 2);
+    assert!(!missing.ready_for_form && missing.prepared.is_none());
+    assert_eq!(missing.reading.results.len(), 2);
+    assert!(
+        missing
+            .validation_errors
+            .iter()
+            .any(|error| error.contains("Se esperaban 2"))
+    );
+
+    card.results.push(WodReading {
+        wod_id: Some(64460),
+        score_value: Some(ScoreValue::Weight { kilograms: 82.5 }),
+    });
+    let valid = evaluate_scorecard(&detail, card.clone());
+    assert!(valid.ready_for_form);
+    let plans = valid.prepared.unwrap();
+    assert_eq!(plans.len(), 2);
+    assert!(
+        plans
+            .iter()
+            .all(|plan| plan.category_id == 16907 && plan.team_reference == "298682")
+    );
+    assert!(
+        card.readings()
+            .iter()
+            .all(|reading| reading.judge_name.as_deref() == Some("Ana"))
+    );
+    assert_eq!(plans[1].wod_id, 64460);
+    assert_eq!(plans[1].value, ScoreValue::Weight { kilograms: 82.5 });
+    assert!(
+        evaluate_scorecard(
+            &detail,
+            Scorecard::from_value(card.stored_reading()).unwrap()
+        )
+        .ready_for_form
+    );
+    assert!(!evaluate_scorecard_expected(&detail, card.clone(), 1).ready_for_form);
+    for invalid in [
+        WodReading {
+            wod_id: Some(64460),
+            score_value: None,
+        },
+        WodReading {
+            wod_id: Some(64460),
+            score_value: Some(ScoreValue::Repetitions { repetitions: 2 }),
+        },
+        WodReading {
+            wod_id: Some(999),
+            score_value: card.results[1].score_value.clone(),
+        },
+        card.results[0].clone(),
+    ] {
+        card.results[1] = invalid;
+        let result = evaluate_scorecard(&detail, card.clone());
+        assert!(!result.ready_for_form && result.prepared.is_none());
+        assert!(
+            result
+                .validation_errors
+                .iter()
+                .any(|error| error.starts_with("Resultado 2:"))
+        );
+    }
+    card.results.clear();
+    assert!(!evaluate_scorecard(&detail, card.clone()).ready_for_form);
+    card.results = vec![
+        WodReading {
+            wod_id: None,
+            score_value: None
+        };
+        3
+    ];
+    assert!(!evaluate_scorecard(&detail, card).ready_for_form);
+
+    let schema = serde_json::to_value(schemars::schema_for!(Scorecard)).unwrap();
+    assert_eq!(schema["properties"]["results"]["minItems"], 1);
+    assert_eq!(schema["properties"]["results"]["maxItems"], 2);
+    assert!(
+        schema["$defs"]["WodReading"]["properties"]
+            .get("category_id")
+            .is_none()
+    );
+}

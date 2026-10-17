@@ -1,7 +1,7 @@
 use super::*;
 use crate::{
     details::CompetitionDetail,
-    scorecard::{ScorecardReading, evaluate_reading},
+    scorecard::{Scorecard, ScorecardReading, WodReading, evaluate_scorecard},
     scoring::{MinutesSeconds, ScoreValue},
 };
 use serde_json::json;
@@ -30,9 +30,14 @@ pub(super) async fn table(photo: &Photo, competition: i64, csrf: &str) -> Result
                     </tr>
                     for (name, label) in [
                         ("category_id", "Categoría"), ("team_reference", "Equipo"),
+                        ("results_count", "Número de WODs"),
                         ("wod_id", "WOD"), ("kind", "Resultado"), ("time", "Tiempo"),
                         ("repetitions", "Repeticiones"), ("kilograms", "Peso (kg)"),
-                        ("tie_break", "Desempate"), ("needs_retake", "Revisar foto"),
+                        ("tie_break", "Desempate"),
+                        ("wod_id_2", "Segundo WOD"), ("kind_2", "Segundo resultado"),
+                        ("time_2", "Tiempo del segundo WOD"), ("repetitions_2", "Repeticiones del segundo WOD"),
+                        ("kilograms_2", "Peso del segundo WOD (kg)"), ("tie_break_2", "Desempate del segundo WOD"),
+                        ("needs_retake", "Revisar foto"),
                         ("retake_reason", "Motivo"),
                     ] { field_row(name: name, label: label) }
                 </tbody></table>
@@ -45,8 +50,9 @@ pub(super) async fn table(photo: &Photo, competition: i64, csrf: &str) -> Result
 
 #[component]
 async fn field_row(name: &'static str, label: &'static str) -> Result<impl View> {
+    let base = name.strip_suffix("_2").unwrap_or(name);
     let score_field =
-        matches!(name, "time" | "repetitions" | "kilograms" | "tie_break").then_some(name);
+        matches!(base, "time" | "repetitions" | "kilograms" | "tie_break").then_some(name);
     Ok(view! {
         <tr data-score-field=(score_field) data-photo-field=(name)>
             <th scope="row">(label)</th>
@@ -56,14 +62,16 @@ async fn field_row(name: &'static str, label: &'static str) -> Result<impl View>
                     <button type="button" class="secondary" data-field-edit=(name) aria-label=(format!("Editar {label}")) aria-expanded="false">"Editar"</button>
                 </div>
                 <div data-field-control=(name) hidden="">
-                    if matches!(name, "category_id" | "team_reference" | "wod_id" | "kind") {
+                    if name=="results_count" {
+                        <select name=(name) aria-label=(label)><option value="1">"WOD único"</option><option value="2">"WOD múltiple (dos resultados)"</option></select>
+                    } else if matches!(base, "category_id" | "team_reference" | "wod_id" | "kind") {
                         <select name=(name) aria-label=(label) required=""></select>
                     } else if name=="needs_retake" {
                         <select name=(name) aria-label=(label)><option value="false">"No"</option><option value="true">"Sí"</option></select>
-                    } else if matches!(name, "time" | "tie_break") {
+                    } else if matches!(base, "time" | "tie_break") {
                         <input name=(name) aria-label=(format!("{label} (mm:ss)")) placeholder="mm:ss" inputmode="numeric" pattern="[0-9]+:[0-5][0-9]">
-                    } else if matches!(name, "repetitions" | "kilograms") {
-                        <input name=(name) aria-label=(label) type="number" min="0" max=((name=="repetitions").then_some("4294967295")) step=(if name=="repetitions" {"1"} else {"any"})>
+                    } else if matches!(base, "repetitions" | "kilograms") {
+                        <input name=(name) aria-label=(label) type="number" min="0" max=((base=="repetitions").then_some("4294967295")) step=(if base=="repetitions" {"1"} else {"any"})>
                     } else {
                         <input name=(name) aria-label=(label) maxlength="2000">
                     }
@@ -73,7 +81,11 @@ async fn field_row(name: &'static str, label: &'static str) -> Result<impl View>
     })
 }
 
-#[derive(Deserialize)]
+fn one_result() -> u8 {
+    1
+}
+
+#[derive(Clone, Deserialize)]
 pub(crate) struct EditForm {
     csrf: String,
     revision: i64,
@@ -81,6 +93,20 @@ pub(crate) struct EditForm {
     wod_id: String,
     team_reference: String,
     kind: String,
+    #[serde(default = "one_result")]
+    results_count: u8,
+    #[serde(default)]
+    wod_id_2: String,
+    #[serde(default)]
+    kind_2: String,
+    #[serde(default)]
+    time_2: String,
+    #[serde(default)]
+    repetitions_2: String,
+    #[serde(default)]
+    kilograms_2: String,
+    #[serde(default)]
+    tie_break_2: String,
     #[serde(default)]
     time: String,
     #[serde(default)]
@@ -96,6 +122,33 @@ pub(crate) struct EditForm {
 }
 
 impl EditForm {
+    fn scorecard(
+        &self,
+        judge_name: Option<String>,
+    ) -> std::result::Result<Scorecard, &'static str> {
+        if !(1..=2).contains(&self.results_count) {
+            return Err("La scorecard debe tener uno o dos resultados.");
+        }
+        let mut card = Scorecard::from(self.reading(judge_name.clone())?);
+        if self.results_count == 2 {
+            let second = Self {
+                wod_id: self.wod_id_2.clone(),
+                kind: self.kind_2.clone(),
+                time: self.time_2.clone(),
+                repetitions: self.repetitions_2.clone(),
+                kilograms: self.kilograms_2.clone(),
+                tie_break: self.tie_break_2.clone(),
+                ..self.clone()
+            }
+            .reading(judge_name)?;
+            card.results.push(WodReading {
+                wod_id: second.wod_id,
+                score_value: second.score_value,
+            });
+        }
+        Ok(card)
+    }
+
     fn reading(
         &self,
         judge_name: Option<String>,
@@ -285,7 +338,7 @@ pub(crate) async fn edit_photo(cx: &Cx, Form(form): Form<EditForm>) -> Result<im
         .as_ref()
         .and_then(|r| r["judge_name"].as_str())
         .map(str::to_owned);
-    let reading = match form.reading(judge_name) {
+    let reading = match form.scorecard(judge_name) {
         Ok(r) => r,
         Err(e) => return Ok(response(StatusCode::BAD_REQUEST, e)),
     };
@@ -295,7 +348,7 @@ pub(crate) async fn edit_photo(cx: &Cx, Form(form): Form<EditForm>) -> Result<im
         .competition_detail(&photo.username, photo.competition_id)
         .await?
         .ok_or_else(|| bad_request("Carga los detalles de la competición"))?;
-    let extraction = evaluate_reading(&detail, reading);
+    let extraction = evaluate_scorecard(&detail, reading);
     if !extraction.ready_for_form {
         return Ok(response(
             StatusCode::BAD_REQUEST,
@@ -304,7 +357,7 @@ pub(crate) async fn edit_photo(cx: &Cx, Form(form): Form<EditForm>) -> Result<im
     }
     let queued = state
         .store
-        .requeue_photo(&photo, session, Some(&extraction), &photo.model)
+        .requeue_scorecard(&photo, session, &extraction)
         .await?;
     Ok(if queued {
         response(

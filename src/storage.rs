@@ -219,7 +219,7 @@ impl SessionStore {
         )
         .await?;
         sqlx::query(
-            "UPDATE score_photos SET state='succeeded',error=NULL,updated_at=now() WHERE id=$1",
+            "UPDATE score_photos SET state=CASE WHEN reading ? 'results' AND jsonb_array_length(result)<jsonb_array_length(reading->'results') THEN 'submitting' ELSE 'succeeded' END,error=NULL,updated_at=now() WHERE id=$1",
         )
         .bind(photo.id)
         .execute(&mut *tx)

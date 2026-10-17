@@ -72,11 +72,14 @@ pub(super) async fn detail_page(cx: &Cx, Form(query): Form<PageQuery>) -> Result
         <p class="eyebrow">"COMPETICIÓN"</p>
         <h1 id="title">(competition.name)</h1>
         <div class="photo-actions">
-            <form method="post" action=(format!("/competitions/{id}/photos")) enctype="multipart/form-data" data-photo-upload="">
+            for (expected, label) in [(1, "WOD único"), (2, "WOD múltiple")] {
+            <form method="post" action=(format!("/competitions/{id}/photos")) enctype="multipart/form-data" data-photo-upload="" data-expected-results=(expected)>
+                <h2>(label)</h2>
+                <input type="hidden" name="expected_results" value=(expected)>
                 <input type="hidden" name="csrf" value=(csrf.clone())>
                 <input type="file" name="photo" accept="image/*" data-photo-input="" aria-label="Elegir foto de la galería o archivos" hidden="">
                 <input type="file" accept="image/*" capture="environment" data-photo-camera-input="" aria-label="Tomar foto de la puntuación" hidden="">
-                <button type="button" data-photo-open="" disabled=(!has_snapshot)>"📷 Tomar foto"</button>
+                <button type="button" data-photo-open="" disabled=(!has_snapshot)>(format!("📷 Tomar foto · {label}"))</button>
                 <button type="button" class="secondary" data-photo-file="" disabled=(!has_snapshot)>"Galería o archivos"</button>
                 <dialog data-photo-camera="">
                     <h2>"Foto de la puntuación"</h2>
@@ -87,6 +90,7 @@ pub(super) async fn detail_page(cx: &Cx, Form(query): Form<PageQuery>) -> Result
                 </dialog>
                 <p data-photo-message="" role="status" aria-live="polite" class="footnote"></p>
             </form>
+            }
             <div class="photo-tools">
                 <a class="button" href=(format!("/competitions/{id}/submission-blocks"))>"Bloquear subidas"</a>
                 <a class="button" href=(format!("/competitions/{id}/photos"))>"Ver fotos"</a>
@@ -115,7 +119,7 @@ pub(super) async fn detail_page(cx: &Cx, Form(query): Form<PageQuery>) -> Result
             </p>
             if let Some(loaded_at)=snapshot.loaded_at { <p class="footnote">"Cargado el " (loaded_at)</p> }
             <form method="post" action=(format!("/competitions/{id}/refresh"))>
-                <input type="hidden" name="csrf" value=(csrf)>
+                <input type="hidden" name="csrf" value=(csrf.clone())>
                 <button type="submit" class="secondary" data-load-trigger="" disabled=(loading)>"Refrescar"</button>
             </form>
             if snapshot.categories.is_empty() { <p>"No hay categorías disponibles."</p> }
@@ -172,7 +176,7 @@ pub(super) async fn detail_page(cx: &Cx, Form(query): Form<PageQuery>) -> Result
         } else {
             <p class="intro">"Todavía no hay información guardada de esta competición."</p>
             <form method="post" action=(format!("/competitions/{id}/load"))>
-                <input type="hidden" name="csrf" value=(csrf)>
+                <input type="hidden" name="csrf" value=(csrf.clone())>
                 <button type="submit" data-load-trigger="" disabled=(loading)>"Cargar"</button>
             </form>
         }

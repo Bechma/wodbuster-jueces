@@ -29,6 +29,151 @@ pub struct ScorecardReading {
     pub retake_reason: Option<String>,
 }
 
+/// Una imagen y una incidencia, con uno o dos resultados del mismo equipo.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct Scorecard {
+    pub category_id: Option<i64>,
+    pub team_reference: Option<String>,
+    #[serde(default)]
+    pub judge_name: Option<String>,
+    #[schemars(length(min = 1, max = 2))]
+    pub results: Vec<WodReading>,
+    #[serde(default)]
+    pub needs_retake: bool,
+    pub retake_reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct WodReading {
+    pub wod_id: Option<i64>,
+    pub score_value: Option<ScoreValue>,
+}
+
+impl From<ScorecardReading> for Scorecard {
+    fn from(reading: ScorecardReading) -> Self {
+        Self {
+            category_id: reading.category_id,
+            team_reference: reading.team_reference,
+            judge_name: reading.judge_name,
+            results: vec![WodReading {
+                wod_id: reading.wod_id,
+                score_value: reading.score_value,
+            }],
+            needs_retake: reading.needs_retake,
+            retake_reason: reading.retake_reason,
+        }
+    }
+}
+
+impl Scorecard {
+    /// Conserva las lecturas históricas de un WOD sin migrar ni perder datos.
+    pub fn from_value(value: serde_json::Value) -> serde_json::Result<Self> {
+        if value.get("results").is_some() {
+            serde_json::from_value(value)
+        } else {
+            serde_json::from_value::<ScorecardReading>(value).map(Into::into)
+        }
+    }
+
+    pub fn readings(&self) -> Vec<ScorecardReading> {
+        self.results
+            .iter()
+            .map(|result| ScorecardReading {
+                category_id: self.category_id,
+                team_reference: self.team_reference.clone(),
+                judge_name: self.judge_name.clone(),
+                wod_id: result.wod_id,
+                score_value: result.score_value.clone(),
+                needs_retake: self.needs_retake,
+                retake_reason: self.retake_reason.clone(),
+            })
+            .collect()
+    }
+
+    pub fn stored_reading(&self) -> serde_json::Value {
+        if self.results.len() == 1 {
+            json!(self.readings()[0])
+        } else {
+            json!(self)
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+pub struct ScorecardExtraction {
+    pub reading: Scorecard,
+    pub ready_for_form: bool,
+    pub prepared: Option<Vec<PreparedScore>>,
+    pub validation_errors: Vec<String>,
+}
+
+impl ScorecardExtraction {
+    pub fn stored_prepared(&self) -> Option<serde_json::Value> {
+        self.prepared.as_ref().map(|plans| {
+            if plans.len() == 1 {
+                json!(plans[0])
+            } else {
+                json!(plans)
+            }
+        })
+    }
+}
+
+pub fn evaluate_scorecard(detail: &CompetitionDetail, reading: Scorecard) -> ScorecardExtraction {
+    let mut errors = Vec::new();
+    let mut plans = Vec::new();
+    if !(1..=2).contains(&reading.results.len()) {
+        errors.push("La scorecard debe contener uno o dos resultados.".into());
+    }
+    let mut seen = std::collections::HashSet::new();
+    for (index, result) in reading.readings().iter().enumerate() {
+        if let Some(id) = result.wod_id
+            && !seen.insert(id)
+        {
+            errors.push(format!(
+                "Resultado {}: el WOD está repetido en la scorecard.",
+                index + 1
+            ));
+        }
+        match prepare_score(detail, result) {
+            Ok(plan) => plans.push(plan),
+            Err(error) => errors.push(format!("Resultado {}: {error}", index + 1)),
+        }
+    }
+    ScorecardExtraction {
+        ready_for_form: errors.is_empty(),
+        prepared: errors.is_empty().then_some(plans),
+        reading,
+        validation_errors: errors,
+    }
+}
+
+pub fn evaluate_scorecard_expected(
+    detail: &CompetitionDetail,
+    mut reading: Scorecard,
+    expected: i16,
+) -> ScorecardExtraction {
+    let detected = reading.results.len();
+    // Mantiene editable el hueco que la IA omitió en una captura de WOD múltiple.
+    if expected == 2 && detected == 1 {
+        reading.results.push(WodReading {
+            wod_id: None,
+            score_value: None,
+        });
+    }
+    let mut extraction = evaluate_scorecard(detail, reading);
+    if detected != expected as usize {
+        extraction.validation_errors.push(format!(
+            "Se esperaban {expected} resultados según el modo de captura y se detectaron {detected}. Revisa la scorecard completa."
+        ));
+        extraction.prepared = None;
+        extraction.ready_for_form = false;
+    }
+    extraction
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "action", rename_all = "snake_case")]
 pub enum FormStep {

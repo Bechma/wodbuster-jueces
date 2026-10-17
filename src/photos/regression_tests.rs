@@ -201,6 +201,7 @@ async fn submitting_job(
             width: 1,
             height: 1,
             model: "test",
+            expected_results: 1,
         })
         .await?;
     let parsing = store.claim_photo().await?.unwrap();
@@ -517,6 +518,294 @@ async fn recovery_during_local_persistence_prevents_stale_cache_and_photo_update
     assert_eq!(
         detail.categories[0].teams[0].scores[0].result.as_deref(),
         Some("52reps")
+    );
+    Ok(())
+}
+
+async fn multiple_job(
+    pool: &PgPool,
+) -> anyhow::Result<(
+    Arc<SessionStore>,
+    Photo,
+    crate::scorecard::ScorecardExtraction,
+    Vec<Score>,
+)> {
+    use crate::scorecard::{Scorecard, WodReading, evaluate_scorecard};
+    let (store, photo, extraction, mut first) = submitting_job(pool).await?;
+    first.metadata["fields"][0]["value"] = json!("2");
+    let mut detail = store
+        .competition_detail("judge@example.com", 3910)
+        .await
+        .map_err(|e| anyhow::anyhow!("{e}"))?
+        .unwrap();
+    let mut wod = detail.categories[0].wods[0].clone();
+    wod.id += 1;
+    wod.name = "Segundo WOD".into();
+    let mut score = detail.categories[0].teams[0].scores[0].clone();
+    score.wod_id = wod.id;
+    let mut second = first.clone();
+    second.wod_id = wod.id;
+    second.result = Some("7reps".into());
+    second.value = Some(ScoreValue::Repetitions { repetitions: 7 });
+    second.metadata["fields"][0]["value"] = json!("7");
+    detail.categories[0].wods.push(wod);
+    detail.categories[0].teams[0].scores.push(score);
+    store
+        .save_competition_detail("judge@example.com", &detail)
+        .await
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    let mut card = Scorecard::from(extraction.reading);
+    card.judge_name = Some("Ana".into());
+    card.results.push(WodReading {
+        wod_id: Some(second.wod_id),
+        score_value: second.value.clone(),
+    });
+    let extraction = evaluate_scorecard(&detail, card);
+    assert!(extraction.ready_for_form);
+    sqlx::query("UPDATE score_photos SET state='parsing',expected_results=2,reading=NULL,prepared=NULL WHERE id=$1")
+        .bind(photo.id).execute(pool).await?;
+    let parsing = store
+        .photo("judge@example.com", 3910, photo.id)
+        .await?
+        .unwrap();
+    assert!(store.parsed_scorecard(&parsing, &extraction).await?);
+    let submitting = store.claim_photo().await?.unwrap();
+    Ok((store, submitting, extraction, vec![first, second]))
+}
+
+#[sqlx::test]
+#[ignore = "Solo Postgres local; sin IA ni Arena"]
+async fn scorecard_blocks_and_validation_prevent_any_partial_submission(
+    pool: PgPool,
+) -> anyhow::Result<()> {
+    use crate::{browser::ArenaBrowser, submission_blocks::SubmissionBlock};
+    let (store, photo, extraction, _) = multiple_job(&pool).await?;
+    let detail = store
+        .competition_detail("judge@example.com", 3910)
+        .await
+        .map_err(|e| anyhow::anyhow!("{e}"))?
+        .unwrap();
+    let mut missing = extraction.reading.clone();
+    missing.results[1].score_value = None;
+    let invalid = evaluate_scorecard(&detail, missing);
+    assert!(!invalid.ready_for_form && invalid.prepared.is_none());
+    assert!(store.parsed_scorecard(&photo, &invalid).await?);
+    assert!(store.claim_photo().await?.is_none());
+    let incomplete = store
+        .photo("judge@example.com", 3910, photo.id)
+        .await?
+        .unwrap();
+    assert_eq!(incomplete.state, "incomplete");
+    assert_eq!(
+        incomplete.reading.as_ref().unwrap()["results"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+    assert!(
+        store
+            .requeue_scorecard(&incomplete, Uuid::nil(), &extraction)
+            .await?
+    );
+    let photo = store.claim_photo().await?.unwrap();
+    store
+        .set_submission_block(
+            "judge@example.com",
+            3910,
+            SubmissionBlock {
+                category_id: 16907,
+                wod_id: 64460,
+                wod_name: String::new(),
+            },
+            true,
+        )
+        .await?;
+    let state = AppState {
+        store: store.clone(),
+        browser: Arc::new(ArenaBrowser::new("ws://127.0.0.1:1".parse()?)),
+        cookie_key: topcoat::cookie::Key::derive_from(
+            b"multiple-test-secret-with-at-least-32-bytes",
+        ),
+        secure_cookies: false,
+    };
+    // La segunda puntuación bloquea toda la tarjeta antes de cargar la sesión o el navegador.
+    process(&state, &photo).await?;
+    let failed = store
+        .photo("judge@example.com", 3910, photo.id)
+        .await?
+        .unwrap();
+    assert_eq!(failed.state, "failed");
+    assert!(failed.prepared.is_none() && failed.result.is_none());
+    assert_eq!(failed.reading.as_ref().unwrap()["needs_retake"], true);
+    assert!(failed.error.as_ref().unwrap().contains("64460"));
+    Ok(())
+}
+
+#[sqlx::test]
+#[ignore = "Solo Postgres local; confirmaciones simuladas, sin IA ni Arena"]
+async fn scorecard_partial_failure_recovery_and_retry_keep_one_incident_and_both_results(
+    pool: PgPool,
+) -> anyhow::Result<()> {
+    let (store, photo, extraction, scores) = multiple_job(&pool).await?;
+    let plans = extraction.prepared.as_ref().unwrap();
+    assert!(persist_confirmed_photo(&store, &photo, &plans[0], &scores[0]).await?);
+    // Repetir la persistencia de una misma confirmación no completa la pareja.
+    assert!(store.confirm_photo(&photo, &scores[0]).await?);
+    let partial = store
+        .photo("judge@example.com", 3910, photo.id)
+        .await?
+        .unwrap();
+    assert!(partial.busy());
+    assert_eq!(
+        partial.result.as_ref().unwrap().as_array().unwrap().len(),
+        1
+    );
+    assert!(
+        partial
+            .result_summary()
+            .contains("Segundo WOD: sin confirmación")
+    );
+    assert!(
+        !store
+            .requeue_scorecard(&partial, Uuid::nil(), &extraction)
+            .await?
+    );
+    assert!(
+        store
+            .finish_photo(
+                &photo,
+                "failed",
+                Some("Segundo WOD: fallo antes de guardar. Confirmado 1 de 2."),
+                None
+            )
+            .await?
+    );
+    let failed = store
+        .photo("judge@example.com", 3910, photo.id)
+        .await?
+        .unwrap();
+    assert_eq!(failed.state, "failed");
+    assert_eq!(failed.result, partial.result);
+    // Una corrección explícita vuelve a encolar ambos resultados; conserva la imagen y el juez.
+    assert!(
+        store
+            .requeue_scorecard(&failed, Uuid::nil(), &extraction)
+            .await?
+    );
+    let retry = store.claim_photo().await?.unwrap();
+    assert_eq!(retry.expected_results, 2);
+    assert!(retry.result.is_none());
+    assert_eq!(retry.reading.as_ref().unwrap()["judge_name"], "Ana");
+    assert_eq!(
+        retry.prepared.as_ref().unwrap().as_array().unwrap().len(),
+        2
+    );
+    assert!(!persist_confirmed_photo(&store, &photo, &plans[1], &scores[1]).await?);
+    assert!(persist_confirmed_photo(&store, &retry, &plans[0], &scores[0]).await?);
+    store.recover_photos().await?;
+    let recovered = store
+        .photo("judge@example.com", 3910, photo.id)
+        .await?
+        .unwrap();
+    assert_eq!(recovered.state, "unconfirmed");
+    assert_eq!(
+        recovered.result.as_ref().unwrap().as_array().unwrap().len(),
+        1
+    );
+    assert!(store.claim_photo().await?.is_none());
+    assert!(!persist_confirmed_photo(&store, &retry, &plans[1], &scores[1]).await?);
+    // Reanalizar borra la lectura y confirmaciones anteriores para procesar ambos de nuevo.
+    assert!(
+        store
+            .requeue_photo(&recovered, Uuid::nil(), None, "test")
+            .await?
+    );
+    let parsing = store.claim_photo().await?.unwrap();
+    assert_eq!(parsing.state, "parsing");
+    assert_eq!(parsing.expected_results, 2);
+    assert!(parsing.reading.is_none() && parsing.result.is_none());
+    assert!(store.parsed_scorecard(&parsing, &extraction).await?);
+    let submitting = store.claim_photo().await?.unwrap();
+    // Ambas confirmadas en remoto, pero se interrumpe la última copia local.
+    for score in &scores {
+        assert!(store.confirm_photo(&submitting, score).await?);
+    }
+    store.recover_photos().await?;
+    let recovered = store
+        .photo("judge@example.com", 3910, photo.id)
+        .await?
+        .unwrap();
+    assert_eq!(recovered.state, "saved_local_failed");
+    assert_eq!(
+        recovered.result.as_ref().unwrap().as_array().unwrap().len(),
+        2
+    );
+    Ok(())
+}
+
+#[sqlx::test]
+#[ignore = "Solo Postgres local; confirmaciones simuladas, sin IA ni Arena"]
+async fn scorecard_succeeds_only_after_both_local_copies_and_can_remove_a_result(
+    pool: PgPool,
+) -> anyhow::Result<()> {
+    let (store, photo, extraction, scores) = multiple_job(&pool).await?;
+    let plans = extraction.prepared.as_ref().unwrap();
+    for index in 0..2 {
+        assert!(persist_confirmed_photo(&store, &photo, &plans[index], &scores[index]).await?);
+        let saved = store
+            .photo("judge@example.com", 3910, photo.id)
+            .await?
+            .unwrap();
+        assert_eq!(
+            saved.state,
+            if index == 0 {
+                "submitting"
+            } else {
+                "succeeded"
+            }
+        );
+    }
+    let saved = store.photos("judge@example.com", 3910, 0).await?.remove(0);
+    assert_eq!(saved.sync_status, "synced");
+    assert_eq!(saved.result.as_ref().unwrap().as_array().unwrap().len(), 2);
+    let detail = store
+        .competition_detail("judge@example.com", 3910)
+        .await
+        .map_err(|e| anyhow::anyhow!("{e}"))?
+        .unwrap();
+    for score in &scores {
+        assert_eq!(
+            detail.categories[0].teams[0]
+                .scores
+                .iter()
+                .find(|s| s.wod_id == score.wod_id)
+                .unwrap()
+                .value,
+            score.value
+        );
+    }
+    let mut single = extraction.reading;
+    single.results.pop();
+    let single = evaluate_scorecard(&detail, single);
+    assert!(
+        store
+            .requeue_scorecard(&saved, Uuid::nil(), &single)
+            .await?
+    );
+    let edited = store
+        .photo("judge@example.com", 3910, photo.id)
+        .await?
+        .unwrap();
+    assert_eq!(edited.expected_results, 1);
+    assert!(edited.reading.as_ref().unwrap().get("results").is_none());
+    assert_eq!(
+        store
+            .competition_detail("judge@example.com", 3910)
+            .await
+            .map_err(|e| anyhow::anyhow!("{e}"))?
+            .unwrap(),
+        detail
     );
     Ok(())
 }

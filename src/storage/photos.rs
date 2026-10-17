@@ -5,8 +5,9 @@ use crate::{
 };
 use sqlx::{Connection, PgConnection};
 
-const FIELDS: &str = "id,username,competition_id,session_id,media_type,width,height,octet_length(image)::int AS bytes,provider,model,state,revision,reading,prepared,validation_errors,error,to_char(created_at AT TIME ZONE 'Europe/Madrid','DD/MM/YYYY HH24:MI:SS') AS created_at";
-const CHECK_FIELDS: &str = "duplicate_count,is_latest,sync_status,sync_checked_at,arena_value";
+const FIELDS: &str = "id,username,competition_id,session_id,media_type,width,height,octet_length(image)::int AS bytes,provider,model,state,revision,reading,prepared,validation_errors,error,result,expected_results,to_char(created_at AT TIME ZONE 'Europe/Madrid','DD/MM/YYYY HH24:MI:SS') AS created_at";
+const CHECK_FIELDS: &str =
+    "duplicate_count,is_latest,sync_status,sync_checked_at,arena_value,result_checks";
 
 #[derive(sqlx::FromRow)]
 pub struct PhotoCheckSummary {
@@ -18,12 +19,71 @@ pub struct PhotoCheckSummary {
 }
 
 impl SessionStore {
+    pub async fn requeue_scorecard(
+        &self,
+        photo: &Photo,
+        session_id: Uuid,
+        extraction: &crate::scorecard::ScorecardExtraction,
+    ) -> sqlx::Result<bool> {
+        let updated = sqlx::query("UPDATE score_photos SET revision=revision+1,session_id=$4,state='parsed',expected_results=$8,reading=$5,prepared=$6,validation_errors='[]',error=NULL,result=NULL,updated_at=now() WHERE id=$1 AND username=$2 AND competition_id=$3 AND revision=$7 AND state NOT IN ('queued','parsing','parsed','submitting')")
+            .bind(photo.id).bind(&photo.username).bind(photo.competition_id).bind(session_id)
+            .bind(Json(extraction.reading.stored_reading())).bind(extraction.stored_prepared().map(Json))
+            .bind(photo.revision).bind(extraction.reading.results.len() as i16).execute(&self.pool).await?;
+        Ok(updated.rows_affected() == 1)
+    }
+
+    pub(crate) async fn parsed_scorecard(
+        &self,
+        photo: &Photo,
+        result: &crate::scorecard::ScorecardExtraction,
+    ) -> sqlx::Result<bool> {
+        if result.reading.results.len() == 1 {
+            return self
+                .parsed_photo(
+                    photo,
+                    &ExtractionResult {
+                        reading: result.reading.readings().remove(0),
+                        ready_for_form: result.ready_for_form,
+                        prepared: result
+                            .prepared
+                            .as_ref()
+                            .and_then(|plans| plans.first().cloned()),
+                        validation_errors: result.validation_errors.clone(),
+                    },
+                )
+                .await;
+        }
+        let updated = sqlx::query("UPDATE score_photos SET state=$2,reading=$3,prepared=$4,validation_errors=$5,error=NULL,updated_at=now() WHERE id=$1 AND revision=$6 AND state=$7 AND state IN ('parsing','submitting')")
+            .bind(photo.id).bind(if result.ready_for_form {"parsed"} else {"incomplete"})
+            .bind(Json(result.reading.stored_reading())).bind(result.stored_prepared().map(Json))
+            .bind(Json(&result.validation_errors)).bind(photo.revision).bind(&photo.state)
+            .execute(&self.pool).await?;
+        Ok(updated.rows_affected() == 1)
+    }
+
+    pub(crate) async fn reject_blocked_scorecard(
+        &self,
+        photo: &Photo,
+        reading: &crate::scorecard::Scorecard,
+        reason: &str,
+    ) -> sqlx::Result<bool> {
+        if reading.results.len() == 1 {
+            return self
+                .reject_blocked_photo(photo, &reading.readings()[0], reason)
+                .await;
+        }
+        let updated = sqlx::query("UPDATE score_photos SET state='failed',reading=$3,prepared=NULL,validation_errors=$4,error=$5,updated_at=now() WHERE id=$1 AND revision=$2 AND state=$6 AND state IN ('parsing','submitting')")
+            .bind(photo.id).bind(photo.revision).bind(Json(reading.stored_reading())).bind(Json(vec![reason]))
+            .bind(reason).bind(&photo.state).execute(&self.pool).await?;
+        Ok(updated.rows_affected() == 1)
+    }
+
     pub async fn save_photo(&self, new: NewPhoto<'_>) -> sqlx::Result<Uuid> {
         // El UUID de la captura hace idempotente una repetición de la petición HTTP.
-        sqlx::query("INSERT INTO score_photos (id,username,competition_id,session_id,image,media_type,width,height,provider,model) VALUES ($1,lower($2),$3,$4,$5,$6,$7,$8,$9,$10) ON CONFLICT (id) DO NOTHING")
+        sqlx::query("INSERT INTO score_photos (id,username,competition_id,session_id,image,media_type,width,height,provider,model,expected_results) VALUES ($1,lower($2),$3,$4,$5,$6,$7,$8,$9,$10,$11) ON CONFLICT (id) DO NOTHING")
             .bind(new.id).bind(new.username).bind(new.competition_id).bind(new.session_id)
             .bind(new.image).bind(new.media_type).bind(new.width).bind(new.height)
-            .bind(crate::ai::PROVIDER).bind(new.model).execute(&self.pool).await?;
+            .bind(crate::ai::PROVIDER).bind(new.model).bind(new.expected_results).execute(&self.pool).await?;
         sqlx::query_scalar(
             "SELECT id FROM score_photos WHERE id=$1 AND username=lower($2) AND competition_id=$3",
         )
@@ -51,7 +111,7 @@ impl SessionStore {
         offset: i64,
         filter: &PhotoFilter,
     ) -> sqlx::Result<Vec<Photo>> {
-        sqlx::query_as(&format!("SELECT {FIELDS},{CHECK_FIELDS} FROM score_photo_checks AS score_photos WHERE username=lower($1) AND competition_id=$2 AND ($4::text IS NULL OR reading->>'category_id'=$4) AND ($5::text IS NULL OR reading->>'wod_id'=$5) AND ($6::text IS NULL OR reading->>'team_reference'=$6)
+        sqlx::query_as(&format!("SELECT {FIELDS},{CHECK_FIELDS} FROM score_photo_checks AS score_photos WHERE username=lower($1) AND competition_id=$2 AND ($4::text IS NULL OR reading->>'category_id'=$4) AND ($5::text IS NULL OR EXISTS (SELECT 1 FROM score_photo_result_checks rc WHERE rc.id=score_photos.id AND rc.wod_id=$5)) AND ($6::text IS NULL OR reading->>'team_reference'=$6)
             AND (NOT $7::boolean
                 OR NOT EXISTS (SELECT 1 FROM competition_categories c WHERE c.username=score_photos.username AND c.competition_id=score_photos.competition_id AND c.id::text=score_photos.reading->>'category_id')
                 OR state IN ('incomplete','failed','unconfirmed','saved_local_failed')
@@ -130,7 +190,7 @@ impl SessionStore {
 
     pub(crate) async fn recover_photos(&self) -> sqlx::Result<()> {
         // Invalida también un parser antiguo si la misma foto vuelve a parsing.
-        sqlx::query("UPDATE score_photos SET revision=revision+1,state=CASE WHEN result IS NOT NULL THEN 'saved_local_failed' WHEN state='parsing' THEN 'queued' ELSE 'unconfirmed' END,error=CASE WHEN result IS NOT NULL THEN 'Arena confirmó la puntuación; se interrumpió la actualización local. Refresca la competición; no repitas el envío.' WHEN state='submitting' THEN 'El servidor se interrumpió durante el envío. Comprueba Arena antes de repetirlo.' ELSE NULL END,updated_at=now() WHERE state IN ('parsing','submitting')")
+        sqlx::query("UPDATE score_photos SET revision=revision+1,state=CASE WHEN result IS NOT NULL AND (NOT reading ? 'results' OR jsonb_array_length(result)>=jsonb_array_length(reading->'results')) THEN 'saved_local_failed' WHEN state='parsing' THEN 'queued' ELSE 'unconfirmed' END,error=CASE WHEN result IS NOT NULL AND (NOT reading ? 'results' OR jsonb_array_length(result)>=jsonb_array_length(reading->'results')) THEN 'Arena confirmó la puntuación; se interrumpió la actualización local. Refresca la competición; no repitas el envío.' WHEN state='submitting' THEN 'El servidor se interrumpió durante el envío de la scorecard. Puede haber resultados guardados; comprueba Arena antes de repetirlo.' ELSE NULL END,updated_at=now() WHERE state IN ('parsing','submitting')")
             .execute(&self.pool).await?;
         Ok(())
     }
@@ -172,7 +232,7 @@ impl SessionStore {
         photo: &Photo,
         score: &crate::details::Score,
     ) -> sqlx::Result<bool> {
-        let updated = sqlx::query("UPDATE score_photos SET result=$3,updated_at=now() WHERE id=$1 AND revision=$2 AND state='submitting'")
+        let updated = sqlx::query("UPDATE score_photos SET result=CASE WHEN reading ? 'results' THEN COALESCE((SELECT jsonb_agg(saved.value) FROM jsonb_array_elements(COALESCE(result,'[]'::jsonb)) saved(value) WHERE saved.value->>'wod_id'<>$3::jsonb->>'wod_id'),'[]'::jsonb) || jsonb_build_array($3::jsonb) ELSE $3::jsonb END,updated_at=now() WHERE id=$1 AND revision=$2 AND state='submitting'")
             .bind(photo.id).bind(photo.revision).bind(Json(score))
             .execute(&self.pool).await?;
         Ok(updated.rows_affected() == 1)
@@ -206,7 +266,7 @@ impl SessionStore {
         error: &str,
     ) -> sqlx::Result<bool> {
         // Un fallo posterior a la confirmación remota nunca borra esa confirmación.
-        let updated = sqlx::query("UPDATE score_photos SET state=CASE WHEN result IS NOT NULL THEN 'saved_local_failed' ELSE $2 END,error=$3,updated_at=now() WHERE id=$1 AND revision=$4 AND state=$5 AND state IN ('parsing','submitting')")
+        let updated = sqlx::query("UPDATE score_photos SET state=CASE WHEN result IS NOT NULL AND $2<>'saved_local_failed' THEN CASE WHEN reading ? 'results' AND jsonb_array_length(result)<jsonb_array_length(reading->'results') THEN 'unconfirmed' ELSE 'saved_local_failed' END ELSE $2 END,error=$3,updated_at=now() WHERE id=$1 AND revision=$4 AND state=$5 AND state IN ('parsing','submitting')")
             .bind(photo.id).bind(state).bind(error).bind(photo.revision).bind(&photo.state)
             .execute(&self.pool).await?;
         Ok(updated.rows_affected() == 1)

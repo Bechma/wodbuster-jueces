@@ -15,11 +15,11 @@ use wodbuster_jueces::{
     browser::ArenaBrowser,
     config::Config,
     details::CompetitionDetail,
-    scorecard::{ScorecardReading, evaluate_reading},
+    scorecard::{Scorecard, evaluate_scorecard},
     storage::{SavedSession, SessionStore},
 };
 
-fn reading_from_json(json: serde_json::Value) -> anyhow::Result<ScorecardReading> {
+fn reading_from_json(json: serde_json::Value) -> anyhow::Result<Scorecard> {
     let mut reading = json.get("reading").cloned().unwrap_or(json);
     // Permite reutilizar salidas antiguas de --validate sin volver a pedir la imagen.
     if let Some(fields) = reading.as_object_mut() {
@@ -27,7 +27,7 @@ fn reading_from_json(json: serde_json::Value) -> anyhow::Result<ScorecardReading
             fields.remove(removed);
         }
     }
-    Ok(serde_json::from_value(reading)?)
+    Ok(Scorecard::from_value(reading)?)
 }
 
 #[derive(Debug, PartialEq)]
@@ -159,57 +159,75 @@ async fn main() -> anyhow::Result<()> {
         eprintln!("Proveedor: ChatGPT nativo de Rig; modelo: {model}.");
         wodbuster_jueces::ai::extract(bytes, &detail, &model).await?
     };
-    let result = evaluate_reading(&detail, reading);
+    let result = evaluate_scorecard(&detail, reading);
     let mut output = serde_json::to_value(&result)?;
+    output["reading"] = result.reading.stored_reading();
+    output["prepared"] = serde_json::json!(result.stored_prepared());
     if let Some(submission) = submission {
-        let Some(prepared) = &result.prepared else {
+        let Some(plans) = &result.prepared else {
             output["submission"] = serde_json::json!({"status":"not_submitted"});
             println!("{}", serde_json::to_string_pretty(&output)?);
             anyhow::bail!("La lectura no es válida; no se ha enviado ninguna puntuación");
         };
-        eprintln!(
-            "Enviando: {} / {} / {}…",
-            prepared.category_name, prepared.wod_name, prepared.team_name
-        );
-        match submission
-            .browser
-            .submit_score(&submission.saved.cookie, &detail, &result.reading)
-            .await
-        {
-            Ok(score) => {
-                output["submission"] = serde_json::json!({"status":"saved","verified":true,"local_updated":false,"score":score});
-                if let Err(error) = submission
-                    .store
-                    .save_confirmed_score(
-                        &submission.saved.username,
-                        detail.id,
-                        prepared.category_id,
-                        &prepared.team_reference,
-                        &score,
-                    )
-                    .await
-                {
-                    println!("{}", serde_json::to_string_pretty(&output)?);
-                    return Err(anyhow::anyhow!("{error}").context("Guardado en Arena, pero falló la actualización local. Refresca la competición; no repitas el envío"));
+        let mut submissions = Vec::<serde_json::Value>::new();
+        for (prepared, reading) in plans.iter().zip(result.reading.readings()) {
+            eprintln!(
+                "Enviando: {} / {} / {}…",
+                prepared.category_name, prepared.wod_name, prepared.team_name
+            );
+            match submission
+                .browser
+                .submit_score(&submission.saved.cookie, &detail, &reading)
+                .await
+            {
+                Ok(score) => {
+                    submissions.push(serde_json::json!({"status":"saved","verified":true,"local_updated":false,"score":score}));
+                    output["submissions"] = serde_json::json!(&submissions);
+                    if plans.len() == 1 {
+                        output["submission"] = submissions.last().unwrap().clone();
+                    }
+                    if let Err(error) = submission
+                        .store
+                        .save_confirmed_score(
+                            &submission.saved.username,
+                            detail.id,
+                            prepared.category_id,
+                            &prepared.team_reference,
+                            &score,
+                        )
+                        .await
+                    {
+                        println!("{}", serde_json::to_string_pretty(&output)?);
+                        return Err(anyhow::anyhow!("{error}").context("Guardado en Arena, pero falló la actualización local. Refresca la competición; no repitas el envío"));
+                    }
+                    submissions.last_mut().unwrap()["local_updated"] = serde_json::json!(true);
+                    output["submissions"] = serde_json::json!(&submissions);
+                    if plans.len() == 1 {
+                        output["submission"] = submissions.last().unwrap().clone();
+                    }
+                    eprintln!(
+                        "Puntuación guardada y verificada en Arena; copia local actualizada."
+                    );
                 }
-                output["submission"]["local_updated"] = serde_json::json!(true);
-                eprintln!("Puntuación guardada y verificada en Arena; copia local actualizada.");
-            }
-            Err(error) => {
-                let status = if error.save_attempted {
-                    "unconfirmed"
-                } else {
-                    "not_submitted"
-                };
-                let message = if error.save_attempted {
-                    "No se confirmó el envío. Comprueba Arena antes de volver a ejecutarlo"
-                } else {
-                    "El envío se detuvo antes de pulsar Guardar; no se ha actualizado Arena"
-                };
-                output["submission"] =
-                    serde_json::json!({"status":status,"error":error.to_string()});
-                println!("{}", serde_json::to_string_pretty(&output)?);
-                return Err(anyhow::Error::new(error).context(message));
+                Err(error) => {
+                    let status = if error.save_attempted {
+                        "unconfirmed"
+                    } else {
+                        "not_submitted"
+                    };
+                    let message = if error.save_attempted {
+                        "No se confirmó el envío. Comprueba Arena antes de volver a ejecutarlo"
+                    } else {
+                        "El envío de este WOD se detuvo antes de pulsar Guardar; los resultados ya confirmados se conservan en Arena"
+                    };
+                    submissions.push(serde_json::json!({"wod_id":prepared.wod_id,"status":status,"error":error.to_string()}));
+                    output["submissions"] = serde_json::json!(&submissions);
+                    if plans.len() == 1 {
+                        output["submission"] = submissions.last().unwrap().clone();
+                    }
+                    println!("{}", serde_json::to_string_pretty(&output)?);
+                    return Err(anyhow::Error::new(error).context(message));
+                }
             }
         }
     }
@@ -226,8 +244,7 @@ mod tests {
         let data = serde_json::json!({"category_id":16907,"wod_id":64459,"team_reference":"298682",
             "score_value":{"kind":"not_completed","repetitions":2,"tie_break":null}});
         assert!(
-            reading_from_json(data.clone())
-                .unwrap()
+            reading_from_json(data.clone()).unwrap().results[0]
                 .score_value
                 .is_some()
         );

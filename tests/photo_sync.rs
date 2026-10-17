@@ -25,6 +25,7 @@ async fn add_photo(store: &SessionStore) -> sqlx::Result<Uuid> {
             width: 1,
             height: 1,
             model: "test",
+            expected_results: 1,
         })
         .await
 }
@@ -260,5 +261,112 @@ async fn scores_duplicates_latest_photo_and_explicit_deletion_are_consistent(
         .await?;
     let busy = store.photo("judge@example.com", 3910, id).await?.unwrap();
     assert!(!store.delete_photo(&busy).await?);
+    Ok(())
+}
+
+#[sqlx::test]
+#[ignore = "Solo Postgres local; sin IA ni Arena"]
+async fn multiple_wods_filter_compare_and_resolve_duplicates_as_one_photo(
+    pool: PgPool,
+) -> topcoat::Result<()> {
+    let store = SessionStore::new(pool.clone(), "test-multiple-scorecards-secret");
+    store
+        .save_competitions("judge@example.com", &[Competition::new(3910, "Test")])
+        .await?;
+    let mut detail = support::fixture();
+    detail.categories[0].wods[0].score_format =
+        ScoreFormat::from_fields(&json!([field("IoReps", "2")]));
+    let mut wod = detail.categories[0].wods[0].clone();
+    wod.id = 64460;
+    wod.name = "Segundo".into();
+    detail.categories[0].wods.push(wod);
+    let first = &mut detail.categories[0].teams[0].scores[0];
+    first.result = Some("2reps".into());
+    first.metadata = json!({"fields":[field("IoReps", "2")]});
+    let mut second = first.clone();
+    second.wod_id = 64460;
+    second.result = Some("7reps".into());
+    second.metadata = json!({"fields":[field("IoReps", "7")]});
+    detail.categories[0].teams[0].scores.push(second);
+    store
+        .save_competition_detail("judge@example.com", &detail)
+        .await?;
+    let reading = json!({"category_id":16907,"team_reference":"298682","judge_name":"Ana",
+        "results":[{"wod_id":64459,"score_value":{"kind":"repetitions","repetitions":2}},
+                   {"wod_id":64460,"score_value":{"kind":"repetitions","repetitions":7}}],
+        "needs_retake":false,"retake_reason":null});
+    let old = add_photo(&store).await?;
+    sqlx::query(
+        "UPDATE score_photos SET reading=$2,state='succeeded',expected_results=2 WHERE id=$1",
+    )
+    .bind(old)
+    .bind(sqlx::types::Json(&reading))
+    .execute(&pool)
+    .await?;
+    for wod in [64459, 64460] {
+        let filtered = store
+            .filtered_photos(
+                "judge@example.com",
+                3910,
+                0,
+                &PhotoFilter {
+                    category_id: Some(16907),
+                    wod_id: Some(wod),
+                    ..Default::default()
+                },
+            )
+            .await?;
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].id, old);
+        assert_eq!(filtered[0].sync_status, "synced");
+        assert_eq!(filtered[0].result_checks.as_array().unwrap().len(), 2);
+    }
+    assert!(store.photos("other@example.com", 3910, 0).await?.is_empty());
+    let latest = add_photo(&store).await?;
+    let mut different = reading.clone();
+    // Un único WOD distinto basta para llevar toda la scorecard a incidencias.
+    different["results"][1]["score_value"]["repetitions"] = json!(8);
+    sqlx::query("UPDATE score_photos SET reading=$2,state='succeeded',expected_results=2,created_at='2030-01-01' WHERE id=$1")
+        .bind(latest).bind(sqlx::types::Json(&different)).execute(&pool).await?;
+    let photos = store.photos("judge@example.com", 3910, 0).await?;
+    assert_eq!(photos.len(), 2);
+    assert!(photos.iter().all(|photo| photo.duplicate_count == 2));
+    assert_eq!(
+        photos
+            .iter()
+            .find(|photo| photo.id == old)
+            .unwrap()
+            .sync_status,
+        "superseded"
+    );
+    let unsynced = PhotoFilter {
+        unsynced: true,
+        ..Default::default()
+    };
+    let differences = store
+        .filtered_photos("judge@example.com", 3910, 0, &unsynced)
+        .await?;
+    assert_eq!(differences.len(), 1);
+    assert_eq!(differences[0].id, latest);
+    assert_eq!(differences[0].result_checks[0]["sync_status"], "synced");
+    assert_eq!(differences[0].result_checks[1]["sync_status"], "different");
+    assert!(store.delete_photo(&differences[0]).await?);
+    let remaining = store.photos("judge@example.com", 3910, 0).await?;
+    assert_eq!(remaining.len(), 1);
+    assert_eq!(remaining[0].duplicate_count, 1);
+    assert_eq!(remaining[0].sync_status, "synced");
+    assert_eq!(
+        store
+            .photo_check_summary("judge@example.com", 3910)
+            .await?
+            .total,
+        1
+    );
+    assert!(
+        store
+            .filtered_photos("judge@example.com", 3910, 0, &unsynced)
+            .await?
+            .is_empty()
+    );
     Ok(())
 }

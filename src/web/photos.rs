@@ -55,6 +55,7 @@ pub(super) async fn upload(cx: &Cx, mut body: Multipart) -> Result<Json<Uploaded
     let mut csrf = None;
     let mut id = None;
     let mut image_bytes = None;
+    let mut expected_results = None;
     while let Some(field) = body.next_field().await? {
         match field.name() {
             Some("csrf") if csrf.is_none() => csrf = Some(field.text().await?),
@@ -69,6 +70,13 @@ pub(super) async fn upload(cx: &Cx, mut body: Multipart) -> Result<Json<Uploaded
             }
             Some("photo") if image_bytes.is_none() => {
                 image_bytes = Some(field.bytes().await?.to_vec())
+            }
+            Some("expected_results") if expected_results.is_none() => {
+                expected_results = Some(match field.text().await?.as_str() {
+                    "1" => 1,
+                    "2" => 2,
+                    _ => return Err(bad_request("Elige WOD único o WOD múltiple").into()),
+                });
             }
             _ => return Err(bad_request("Formulario de foto no válido").into()),
         }
@@ -109,6 +117,7 @@ pub(super) async fn upload(cx: &Cx, mut body: Multipart) -> Result<Json<Uploaded
             width,
             height,
             model: &crate::ai::model_name(),
+            expected_results: expected_results.unwrap_or(1),
         })
         .await?;
     Ok(Json(Uploaded {
@@ -285,7 +294,7 @@ async fn photo_card(photo: &Photo, competition: i64, csrf: &str) -> Result<impl 
     });
     let target = target(photo.prepared.as_ref());
     Ok(view! {
-        <article class="photo-card" data-photo-id=(photo.id.to_string()) data-photo-status=(photo.state.clone()) data-photo-reading=(photo.reading.as_ref().unwrap_or(&serde_json::Value::Null).to_string())>
+        <article class="photo-card" data-photo-id=(photo.id.to_string()) data-photo-status=(photo.state.clone()) data-expected-results=(photo.expected_results) data-photo-reading=(photo.reading.as_ref().unwrap_or(&serde_json::Value::Null).to_string())>
             <a href=(format!("/competitions/{competition}/photos/{}/image",photo.id)) target="_blank" rel="noopener">
                 <img src=(format!("/competitions/{competition}/photos/{}/image",photo.id)) alt="Foto de la puntuación" loading="lazy" width=(photo.width) height=(photo.height)>
             </a>
@@ -319,6 +328,7 @@ async fn photo_card(photo: &Photo, competition: i64, csrf: &str) -> Result<impl 
                 <p class="reference" data-photo-sync-time="">(photo.sync_checked_at.as_ref().map(|at|format!("Datos de Arena: {at}")).unwrap_or_default())</p>
                 <p class="notice warning" data-photo-duplicate="" role="alert" hidden=(photo.duplicate_count<2)>(photo.duplicate_label())</p>
                 <p data-photo-target="">(target)</p>
+                <p class="footnote" data-photo-results="">(photo.result_summary())</p>
                 <div class="notice warning" data-photo-warning="" role="alert" hidden=(!photo.warning())>"Aviso: la puntuación se ha guardado, pero la IA ha indicado que hace falta revisar la foto (needs_retake)."</div>
                 <p class="notice error" data-photo-error="" hidden=(errors.is_empty())>(errors)</p>
                 editor::table(photo: photo, competition: competition, csrf: csrf)
@@ -330,6 +340,24 @@ async fn photo_card(photo: &Photo, competition: i64, csrf: &str) -> Result<impl 
 fn target(prepared: Option<&serde_json::Value>) -> String {
     prepared
         .map(|p| {
+            if let Some(plans) = p.as_array() {
+                let Some(first) = plans.first() else {
+                    return String::new();
+                };
+                return [
+                    first["category_name"]
+                        .as_str()
+                        .unwrap_or_default()
+                        .to_owned(),
+                    plans
+                        .iter()
+                        .filter_map(|plan| plan["wod_name"].as_str())
+                        .collect::<Vec<_>>()
+                        .join(" + "),
+                    first["team_name"].as_str().unwrap_or_default().to_owned(),
+                ]
+                .join(" · ");
+            }
             ["category_name", "wod_name", "team_name"]
                 .iter()
                 .filter_map(|key| p[*key].as_str())
@@ -350,6 +378,7 @@ pub(super) struct PhotoStatus {
     progress: &'static str,
     sync_label: &'static str,
     duplicate_label: &'static str,
+    result_summary: String,
 }
 
 #[route(GET "/competitions/{competition_id}/photos/status")]
@@ -387,6 +416,7 @@ pub(super) async fn status(
                 progress: photo.progress(),
                 sync_label: photo.sync_label(),
                 duplicate_label: photo.duplicate_label(),
+                result_summary: photo.result_summary(),
                 photo,
             })
             .collect(),

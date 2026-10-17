@@ -19,6 +19,7 @@ mod competition_view;
 mod layout;
 mod load_view;
 mod photos;
+mod submission_blocks;
 
 use crate::{AppState, browser::LoginError};
 
@@ -38,6 +39,8 @@ pub fn router(state: AppState) -> Router {
         .route(competition_view::refresh_detail)
         .route(competition_view::check_sync)
         .route(competition_view::delete_competition)
+        .page(submission_blocks::blocks_page)
+        .route(submission_blocks::set_block)
         .route(load_view::status)
         .route(load_view::script)
         .page(photos::gallery)

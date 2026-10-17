@@ -82,6 +82,7 @@ jobs:
       - name: Postgres and Browserless integration tests
         run: |
           cargo test --locked --lib photos:: -- --ignored --test-threads=1
+          cargo test --locked --lib storage::submission_blocks:: -- --ignored --test-threads=1
           cargo test --locked --lib loads:: -- --ignored --test-threads=1
           cargo test --locked --lib browserless_login_fixture -- --ignored
           cargo test --locked --lib refreshed_saved_and_unsaved_scores_prepare_without_saving_or_changing_original_values -- --ignored
@@ -89,4 +90,4 @@ jobs:
           cargo test --locked \
             --test storage --test details_storage --test score_submission_storage \
             --test photo_filters --test photo_retention --test photo_sync \
-            --test photos_web --test web -- --ignored --test-threads=1
+            --test photos_web --test web --test submission_blocks -- --ignored --test-threads=1

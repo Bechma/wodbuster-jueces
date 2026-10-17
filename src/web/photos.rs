@@ -21,7 +21,10 @@ fn competition_id(cx: &Cx) -> Result<i64> {
         .ok_or_else(|| bad_request("Competición no válida").into())
 }
 
-async fn account(cx: &Cx, competition: i64) -> Result<(Uuid, crate::storage::SavedSession)> {
+pub(super) async fn account(
+    cx: &Cx,
+    competition: i64,
+) -> Result<(Uuid, crate::storage::SavedSession)> {
     let state: &AppState = app_context(cx);
     let id = session_id(cx, state).ok_or_else(unauthorized)?;
     let session = state.store.load(id).await?.ok_or_else(unauthorized)?;

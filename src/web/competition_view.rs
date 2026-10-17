@@ -88,6 +88,7 @@ pub(super) async fn detail_page(cx: &Cx, Form(query): Form<PageQuery>) -> Result
                 <p data-photo-message="" role="status" aria-live="polite" class="footnote"></p>
             </form>
             <div class="photo-tools">
+                <a class="button" href=(format!("/competitions/{id}/submission-blocks"))>"Bloquear subidas"</a>
                 <a class="button" href=(format!("/competitions/{id}/photos"))>"Ver fotos"</a>
                 <a class="button" href=(photos::gallery_location(id, &PhotoFilter { issues: true, ..Default::default() }, 0))>"Fotos sin categorizar o con problemas"</a>
                 <form method="post" action=(format!("/competitions/{id}/check-sync"))>

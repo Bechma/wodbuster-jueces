@@ -154,6 +154,18 @@ impl SessionStore {
         Ok(updated.rows_affected() == 1)
     }
 
+    pub(crate) async fn reject_blocked_photo(
+        &self,
+        photo: &Photo,
+        reading: &crate::scorecard::ScorecardReading,
+        reason: &str,
+    ) -> sqlx::Result<bool> {
+        let updated = sqlx::query("UPDATE score_photos SET state='failed',reading=$3,prepared=NULL,validation_errors=$4,error=$5,updated_at=now() WHERE id=$1 AND revision=$2 AND state=$6 AND state IN ('parsing','submitting')")
+            .bind(photo.id).bind(photo.revision).bind(Json(reading)).bind(Json(vec![reason]))
+            .bind(reason).bind(&photo.state).execute(&self.pool).await?;
+        Ok(updated.rows_affected() == 1)
+    }
+
     /// Conserva la confirmación remota sin liberar la foto para nuevas ediciones.
     pub(crate) async fn confirm_photo(
         &self,

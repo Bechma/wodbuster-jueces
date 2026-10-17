@@ -21,10 +21,11 @@ pub struct ScorecardReading {
     /// Nombre o identificador del juez escrito en la imagen. Solo informativo; null si no es legible.
     #[serde(default)]
     pub judge_name: Option<String>,
-    /// Señal informativa para datos que no se han podido leer. No bloquea una lectura completa y válida.
+    /// Aviso de revisión de la IA; el bloqueador local también lo activa al rechazar una subida.
+    /// Por sí solo no bloquea una lectura completa y válida.
     #[serde(default)]
     pub needs_retake: bool,
-    /// Motivo breve de los datos ausentes o ilegibles. Null si no hay observaciones.
+    /// Motivo de revisión o bloqueo. Null si no hay observaciones.
     pub retake_reason: Option<String>,
 }
 

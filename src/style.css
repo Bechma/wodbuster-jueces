@@ -11,6 +11,7 @@ p { line-height: 1.6; }
 label { display: block; font-size: 13px; font-weight: 650; margin: 20px 0 8px; }
 input:not([type=hidden]) { width: 100%; border: 1px solid #cdd9df; background: #fcfdfd; border-radius: 8px; padding: 12px 13px; font: inherit; font-size: 14px; }
 input:focus { outline: 3px solid #087b7720; border-color: #087b77; }
+.submission-block-form select { width:100%; padding:12px; font:inherit; border:1px solid #cdd9df; border-radius:8px; background:#fcfdfd; }
 button { margin-top: 26px; width: 100%; border: 0; background: #087b77; color: white; padding: 14px 12px; border-radius: 8px; font: inherit; font-size: 14px; font-weight: 700; cursor: pointer; }
 button:enabled:hover { background: #076460; }
 button:focus-visible { outline: 3px solid #087b7760; outline-offset: 3px; }

@@ -133,7 +133,41 @@ Se utiliza la sesión OAuth creada con `cargo run --example chatgpt_login`, guar
 otras ejecuciones o servicios. Postgres, Browserless y la cookie cifrada son los mismos
 que usa la aplicación. El usuario debe haber cargado los detalles de la competición.
 
+## Bloqueos de puntuaciones
+
+En la competición, **Bloquear subidas** abre una pantalla independiente para bloquear
+una categoría completa, un WOD en todas las categorías o una combinación categoría/WOD.
+Los bloqueos pertenecen a la cuenta y competición actuales, se guardan en Postgres y
+sobreviven a los refrescos de datos de Arena. Los WODs se agrupan por nombre
+(ignorando mayúsculas y espacios sobrantes): «Giralda» aparece una sola vez y su
+bloqueo con «Todas las categorías» cubre todos sus IDs, incluidas nuevas categorías
+que aparezcan tras refrescar. Los bloqueos anteriores se convierten por nombre
+cuando el WOD sigue disponible en el detalle guardado.
+
+Tras la extracción de IA y antes de cada intento de envío se comprueban los bloqueos
+vigentes. Una coincidencia deja la foto en `failed`, sin formulario preparado, con un
+error explícito y `needs_retake=true`. Si `retake_reason` está ausente o vacío se rellena
+con el motivo del bloqueo; si ya tenía contenido se conserva y el error de bloqueo se
+guarda aparte. Esto también impide saltarse el bloqueo mediante correcciones manuales.
+La foto y su lectura se conservan para revisión. Desbloquear no reenvía automáticamente
+las fotos: hay que reintentarlas desde la galería.
+
+La confirmación de un bloqueo espera a que terminen los envíos que ya estaban en curso.
+Los reintentos por navegador ocupado liberan la exclusión y vuelven a leer las reglas.
+La configuración y el rechazo no consultan ni modifican Arena.
+
 ## Pruebas
+
+Las pruebas específicas usan lecturas simuladas, HTTP local y Postgres temporal:
+
+```sh
+cargo test --lib submission_blocks::
+cargo test --test submission_blocks -- --ignored
+cargo test --lib submission_blocks_reject -- --ignored
+cargo test --lib storage::submission_blocks:: -- --ignored
+```
+
+### Suite existente
 
 ```sh
 cargo test --all-targets

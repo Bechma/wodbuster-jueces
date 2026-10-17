@@ -15,6 +15,145 @@ mod support {
     include!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/mod.rs"));
 }
 
+#[sqlx::test]
+#[ignore = "Solo Postgres local; navegador inaccesible, sin IA ni Arena"]
+async fn submission_blocks_reject_parsed_photos_and_manual_retries_before_any_remote_access(
+    pool: PgPool,
+) -> anyhow::Result<()> {
+    use crate::{browser::ArenaBrowser, submission_blocks::SubmissionBlock};
+    let (store, photo, extraction, _) = submitting_job(&pool).await?;
+    let block = SubmissionBlock {
+        category_id: 16907,
+        wod_id: 0,
+        wod_name: "giralda".into(),
+    };
+    store
+        .set_submission_block("judge@example.com", 3910, block.clone(), true)
+        .await?;
+    let detail = store
+        .competition_detail("judge@example.com", 3910)
+        .await
+        .map_err(|e| anyhow::anyhow!("{e}"))?
+        .unwrap();
+    // Simula la lectura devuelta por la IA, sin invocar al proveedor.
+    sqlx::query("UPDATE score_photos SET state='parsing' WHERE id=$1")
+        .bind(photo.id)
+        .execute(&pool)
+        .await?;
+    let parsing = store
+        .photo("judge@example.com", 3910, photo.id)
+        .await?
+        .unwrap();
+    let mut reading = extraction.reading.clone();
+    assert!(
+        reject_if_blocked(
+            &store,
+            &parsing,
+            &detail,
+            &mut reading,
+            std::slice::from_ref(&block)
+        )
+        .await?
+    );
+    let failed = store
+        .photo("judge@example.com", 3910, photo.id)
+        .await?
+        .unwrap();
+    assert_eq!(failed.state, "failed");
+    assert!(
+        failed.reading.as_ref().unwrap()["needs_retake"]
+            .as_bool()
+            .unwrap()
+    );
+    assert!(
+        failed.reading.as_ref().unwrap()["retake_reason"]
+            .as_str()
+            .unwrap()
+            .contains("Subida bloqueada")
+    );
+    assert!(failed.prepared.is_none());
+    assert!(
+        failed
+            .error
+            .as_deref()
+            .unwrap()
+            .contains("Subida bloqueada")
+    );
+    assert!(!failed.validation_errors.as_array().unwrap().is_empty());
+    assert!(store.claim_photo().await?.is_none());
+
+    let state = AppState {
+        store: store.clone(),
+        browser: Arc::new(ArenaBrowser::new("ws://127.0.0.1:1".parse()?)),
+        cookie_key: topcoat::cookie::Key::derive_from(
+            b"submission-block-test-secret-with-at-least-32-bytes",
+        ),
+        secure_cookies: false,
+    };
+    for block in [
+        block,
+        SubmissionBlock {
+            category_id: 16907,
+            wod_id: 0,
+            wod_name: String::new(),
+        },
+        SubmissionBlock {
+            category_id: 0,
+            wod_id: 0,
+            wod_name: "giralda".into(),
+        },
+    ] {
+        store
+            .set_submission_block("judge@example.com", 3910, block.clone(), true)
+            .await?;
+        let failed = store
+            .photo("judge@example.com", 3910, photo.id)
+            .await?
+            .unwrap();
+        // La edición manual intenta borrar la marca de retake y vuelve a encolar.
+        assert!(
+            store
+                .requeue_photo(&failed, Uuid::nil(), Some(&extraction), "test")
+                .await?
+        );
+        let submitting = store.claim_photo().await?.unwrap();
+        // Sin sesión ni navegador disponibles: debe terminar por el bloqueo antes de ambos.
+        process(&state, &submitting).await?;
+        let failed = store
+            .photo("judge@example.com", 3910, photo.id)
+            .await?
+            .unwrap();
+        assert_eq!(failed.state, "failed");
+        assert_eq!(failed.reading.as_ref().unwrap()["needs_retake"], true);
+        assert!(failed.prepared.is_none());
+        store
+            .set_submission_block("judge@example.com", 3910, block, false)
+            .await?;
+    }
+    let failed = store
+        .photo("judge@example.com", 3910, photo.id)
+        .await?
+        .unwrap();
+    assert!(
+        store
+            .requeue_photo(&failed, Uuid::nil(), Some(&extraction), "test")
+            .await?
+    );
+    let submitting = store.claim_photo().await?.unwrap();
+    assert!(submitting.prepared.is_some());
+    assert!(
+        !reject_if_blocked(
+            &store,
+            &submitting,
+            &detail,
+            &mut extraction.reading.clone(),
+            &store.submission_blocks("judge@example.com", 3910).await?
+        )
+        .await?
+    );
+    Ok(())
+}
+
 async fn submitting_job(
     pool: &PgPool,
 ) -> anyhow::Result<(Arc<SessionStore>, Photo, ExtractionResult, Score)> {

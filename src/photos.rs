@@ -227,14 +227,28 @@ async fn process(state: &AppState, photo: &Photo) -> anyhow::Result<()> {
             .photo_image(&photo.username, photo.competition_id, photo.id)
             .await?
             .context("Foto no disponible")?;
-        let reading = crate::ai::extract(bytes, &detail, &photo.model).await?;
+        let mut reading = crate::ai::extract(bytes, &detail, &photo.model).await?;
+        let blocks = state
+            .store
+            .submission_blocks(&photo.username, photo.competition_id)
+            .await?;
+        if reject_if_blocked(&state.store, photo, &detail, &mut reading, &blocks).await? {
+            return Ok(());
+        }
         let result = evaluate_reading(&detail, reading);
         state.store.parsed_photo(photo, &result).await?;
         return Ok(());
     }
-    let reading: ScorecardReading =
+    let mut reading: ScorecardReading =
         serde_json::from_value(photo.reading.clone().context("Falta la lectura de IA")?)?;
-    let prepared = evaluate_reading(&detail, reading);
+    let blocks = state
+        .store
+        .submission_blocks(&photo.username, photo.competition_id)
+        .await?;
+    if reject_if_blocked(&state.store, photo, &detail, &mut reading, &blocks).await? {
+        return Ok(());
+    }
+    let prepared = evaluate_reading(&detail, reading.clone());
     let Some(plan) = &prepared.prepared else {
         state.store.parsed_photo(photo, &prepared).await?;
         return Ok(());
@@ -250,10 +264,25 @@ async fn process(state: &AppState, photo: &Photo) -> anyhow::Result<()> {
         "La sesión no corresponde a la foto"
     );
     let submission = loop {
+        let (guard, blocks) = state
+            .store
+            .submission_guard(&photo.username, photo.competition_id)
+            .await?;
+        if let Some(reason) = crate::submission_blocks::enforce(&detail, &mut reading, &blocks) {
+            // Ya no se enviará nada: libera la conexión antes de persistir el rechazo.
+            guard.commit().await?;
+            state
+                .store
+                .reject_blocked_photo(photo, &reading, &reason)
+                .await?;
+            return Ok(());
+        }
         let result = state
             .browser
             .submit_score(&session.cookie, &detail, &prepared.reading)
             .await;
+        // Libera también antes de esperar a Browserless: el siguiente intento relee los bloqueos.
+        guard.commit().await?;
         if result.as_ref().is_err_and(|error| error.busy) {
             tokio::time::sleep(Duration::from_secs(1)).await;
             continue;
@@ -279,6 +308,20 @@ async fn process(state: &AppState, photo: &Photo) -> anyhow::Result<()> {
         }
     }
     Ok(())
+}
+
+async fn reject_if_blocked(
+    store: &crate::storage::SessionStore,
+    photo: &Photo,
+    detail: &crate::details::CompetitionDetail,
+    reading: &mut ScorecardReading,
+    blocks: &[crate::submission_blocks::SubmissionBlock],
+) -> anyhow::Result<bool> {
+    let Some(reason) = crate::submission_blocks::enforce(detail, reading, blocks) else {
+        return Ok(false);
+    };
+    store.reject_blocked_photo(photo, reading, &reason).await?;
+    Ok(true)
 }
 
 async fn persist_confirmed_photo(

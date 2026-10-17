@@ -12,6 +12,7 @@ use crate::details::CompetitionDetail;
 use sqlx::types::Json;
 mod loads;
 mod photos;
+mod submission_blocks;
 
 pub struct SessionStore {
     pool: PgPool,
